@@ -1,7 +1,4 @@
-# This workflow will build a .NET project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-net
-
-name: .NET
+name: .NET Framework 4.7.2
 
 on:
   push:
@@ -11,18 +8,24 @@ on:
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 4.7.2
-    - name: Restore dependencies
-      run: dotnet restore
-    - name: Build
-      run: dotnet build --no-restore
-    - name: Test
-      run: dotnet test --no-build --verbosity normal
+      - uses: actions/checkout@v4
+
+      # Install NuGet (needed for packages.config projects)
+      - name: Setup NuGet
+        uses: NuGet/setup-nuget@v2
+
+      # Restore NuGet packages
+      - name: Restore NuGet packages
+        run: nuget restore YourSolution.sln
+
+      # Build using MSBuild (Visual Studio Build Tools are preinstalled)
+      - name: Build
+        run: msbuild YourSolution.sln /p:Configuration=Release
+
+      # Run tests (if you have MSTest / NUnit / xUnit)
+      - name: Test
+        run: |
+          vstest.console.exe **\bin\Release\*test*.dll
