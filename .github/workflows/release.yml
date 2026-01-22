@@ -36,23 +36,33 @@ jobs:
 
           & $msbuild ScomDbExporter.sln /p:Configuration=Release
 
-      # ✅ FIX: explicitly collect known output folders
+      # ✅ Package with deduplication (flat ZIP, no duplicates)
       - name: Package Release
         shell: pwsh
         run: |
           $artifactDir = "artifacts"
-          New-Item -ItemType Directory -Force $artifactDir | Out-Null
-
-          $paths = @(
-            "ScomDbExporter\bin\Release\*",
-            "ScomDbExporter.Console\bin\Release\*",
-            "ScomDbExporter.Service\bin\Release\*"
-          )
-
           $zip = "$artifactDir/ScomDbExporter-${{ github.ref_name }}.zip"
 
+          New-Item -ItemType Directory -Force $artifactDir | Out-Null
+
+          # Collect all Release files
+          $files = Get-ChildItem -Recurse -File `
+            ScomDbExporter\bin\Release, `
+            ScomDbExporter.Console\bin\Release, `
+            ScomDbExporter.Service\bin\Release
+
+          if (-not $files) {
+            throw "No files found to package"
+          }
+
+          # Deduplicate by filename (first occurrence wins)
+          $uniqueFiles = $files |
+            Sort-Object FullName |
+            Group-Object Name |
+            ForEach-Object { $_.Group[0].FullName }
+
           Compress-Archive `
-            -Path $paths `
+            -Path $uniqueFiles `
             -DestinationPath $zip `
             -Force
 
