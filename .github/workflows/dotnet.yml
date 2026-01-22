@@ -21,8 +21,18 @@ jobs:
       - name: Restore NuGet packages
         run: nuget restore ScomDbExporter.sln
 
-      # Build using MSBuild (Visual Studio Build Tools are preinstalled)
+      # Build using MSBuild (located via vswhere)
       - name: Build
-        run: msbuild ScomDbExporter.sln /p:Configuration=Release
+        shell: pwsh
+        run: |
+          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest `
+            -products * `
+            -requires Microsoft.Component.MSBuild `
+            -find MSBuild\**\Bin\MSBuild.exe
 
+          if (-not $msbuild) {
+            throw "MSBuild not found"
+          }
 
+          & $msbuild ScomDbExporter.sln /p:Configuration=Release
