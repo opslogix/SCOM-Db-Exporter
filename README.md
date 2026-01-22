@@ -29,7 +29,7 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
   "Modules": {
     "Metrics": {
       "Enabled": true,
-      "PollSeconds": 5
+      "PollSeconds": 30
     },
     "State": {
       "Enabled": true,
