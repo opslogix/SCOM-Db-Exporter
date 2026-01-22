@@ -1,0 +1,806 @@
+{
+  "Mappings": [
+    {
+      "ObjectName": "Processor Information",
+      "CounterName": "% Processor Time",
+      "Instance": "_Total",
+      "MetricName": "windows_cpu_time_total",
+      "MetricType": "counter",
+      "Labels": {
+        "core": "{instance}",
+        "mode": "idle"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Processor Information",
+      "CounterName": "% DPC Time",
+      "Instance": "_Total",
+      "MetricName": "windows_cpu_time_total",
+      "MetricType": "counter",
+      "Labels": {
+        "core": "{instance}",
+        "mode": "dpc"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Processor Information",
+      "CounterName": "% Interrupt Time",
+      "Instance": "_Total",
+      "MetricName": "windows_cpu_time_total",
+      "MetricType": "counter",
+      "Labels": {
+        "core": "{instance}",
+        "mode": "interrupt"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Processor",
+      "CounterName": "% Processor Time",
+      "Instance": "*",
+      "MetricName": "windows_cpu_time_total",
+      "MetricType": "counter",
+      "Labels": {
+        "core": "{instance}",
+        "mode": "idle"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Processor",
+      "CounterName": "% DPC Time",
+      "Instance": "*",
+      "MetricName": "windows_cpu_time_total",
+      "MetricType": "counter",
+      "Labels": {
+        "core": "{instance}",
+        "mode": "dpc"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Processor",
+      "CounterName": "% Interrupt Time",
+      "Instance": "*",
+      "MetricName": "windows_cpu_time_total",
+      "MetricType": "counter",
+      "Labels": {
+        "core": "{instance}",
+        "mode": "interrupt"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Available MBytes",
+      "MetricName": "windows_memory_available_bytes",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1048576.0,
+      "Notes": "IMPORTANT: Use windows_memory_available_bytes from 'memory' collector, NOT windows_os_physical_memory_free_bytes"
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Pages/sec",
+      "MetricName": "windows_memory_page_faults_total",
+      "MetricType": "counter",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Page Reads/sec",
+      "MetricName": "windows_memory_page_reads_total",
+      "MetricType": "counter",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Page Writes/sec",
+      "MetricName": "windows_memory_page_writes_total",
+      "MetricType": "counter",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "% Committed Bytes In Use",
+      "MetricName": "windows_memory_committed_bytes",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1.0,
+      "Notes": "Calculated metric: committed_bytes divided by commit_limit"
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Pool Nonpaged Bytes",
+      "MetricName": "windows_memory_pool_nonpaged_bytes_total",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Pool Paged Bytes",
+      "MetricName": "windows_memory_pool_paged_bytes",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Free System Page Table Entries",
+      "MetricName": "windows_memory_free_system_page_table_entries",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Cache Bytes",
+      "MetricName": "windows_memory_cache_bytes",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Committed Bytes",
+      "MetricName": "windows_memory_committed_bytes",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Commit Limit",
+      "MetricName": "windows_cs_physical_memory_bytes",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1.0,
+      "Notes": "Used as denominator for % Committed Bytes calculation"
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Pages Output/sec",
+      "MetricName": "windows_memory_pages_output_total",
+      "MetricType": "counter",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Memory",
+      "CounterName": "Pages Input/sec",
+      "MetricName": "windows_memory_pages_input_total",
+      "MetricType": "counter",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Free Megabytes",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_free_bytes",
+      "MetricType": "gauge",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1048576.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "% Free Space",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_size_bytes",
+      "MetricType": "gauge",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0,
+      "Notes": "Calculated from free_bytes / size_bytes"
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "% Idle Time",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_idle_seconds_total",
+      "MetricType": "counter",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Current Disk Queue Length",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_requests_queued",
+      "MetricType": "gauge",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Avg. Disk Queue Length",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_avg_queue_length",
+      "MetricType": "gauge",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Avg. Disk sec/Read",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_read_seconds_total",
+      "MetricType": "counter",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Avg. Disk sec/Write",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_write_seconds_total",
+      "MetricType": "counter",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Avg. Disk sec/Transfer",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_read_seconds_total",
+      "MetricType": "counter",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Disk Bytes/sec",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_read_bytes_total",
+      "MetricType": "counter",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Disk Reads/sec",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_reads_total",
+      "MetricType": "counter",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Disk Writes/sec",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_writes_total",
+      "MetricType": "counter",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Disk Read Bytes/sec",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_read_bytes_total",
+      "MetricType": "counter",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Disk Write Bytes/sec",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_write_bytes_total",
+      "MetricType": "counter",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Avg. Disk Read Queue Length",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_read_requests_queued",
+      "MetricType": "gauge",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Avg. Disk Write Queue Length",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_write_requests_queued",
+      "MetricType": "gauge",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "LogicalDisk",
+      "CounterName": "Split IO/Sec",
+      "Instance": "*",
+      "MetricName": "windows_logical_disk_split_ios_total",
+      "MetricType": "counter",
+      "Labels": {
+        "volume": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "% Idle Time",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_idle_seconds_total",
+      "MetricType": "counter",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Current Disk Queue Length",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_requests_queued",
+      "MetricType": "gauge",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Avg. Disk Queue Length",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_avg_queue_length",
+      "MetricType": "gauge",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Avg. Disk sec/Read",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_read_seconds_total",
+      "MetricType": "counter",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Avg. Disk sec/Write",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_write_seconds_total",
+      "MetricType": "counter",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Avg. Disk sec/Transfer",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_read_seconds_total",
+      "MetricType": "counter",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Disk Bytes/sec",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_read_bytes_total",
+      "MetricType": "counter",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Disk Reads/sec",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_reads_total",
+      "MetricType": "counter",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Disk Writes/sec",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_writes_total",
+      "MetricType": "counter",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Disk Read Bytes/sec",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_read_bytes_total",
+      "MetricType": "counter",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Disk Write Bytes/sec",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_write_bytes_total",
+      "MetricType": "counter",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Avg. Disk Read Queue Length",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_read_requests_queued",
+      "MetricType": "gauge",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Avg. Disk Write Queue Length",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_write_requests_queued",
+      "MetricType": "gauge",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "PhysicalDisk",
+      "CounterName": "Split IO/Sec",
+      "Instance": "*",
+      "MetricName": "windows_physical_disk_split_ios_total",
+      "MetricType": "counter",
+      "Labels": {
+        "disk": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Network Adapter",
+      "CounterName": "Bytes Received/sec",
+      "Instance": "*",
+      "MetricName": "windows_net_bytes_received_total",
+      "MetricType": "counter",
+      "Labels": {
+        "nic": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Network Adapter",
+      "CounterName": "Bytes Sent/sec",
+      "Instance": "*",
+      "MetricName": "windows_net_bytes_sent_total",
+      "MetricType": "counter",
+      "Labels": {
+        "nic": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Network Adapter",
+      "CounterName": "Bytes Total/sec",
+      "Instance": "*",
+      "MetricName": "windows_net_bytes_total",
+      "MetricType": "counter",
+      "Labels": {
+        "nic": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Network Adapter",
+      "CounterName": "Current Bandwidth",
+      "Instance": "*",
+      "MetricName": "windows_net_current_bandwidth_bytes",
+      "MetricType": "gauge",
+      "Labels": {
+        "nic": "{instance}"
+      },
+      "ValueMultiplier": 1.0,
+      "Notes": "Bandwidth in bytes per second (already converted from bits/sec)"
+    },
+    {
+      "ObjectName": "Network Adapter",
+      "CounterName": "Output Queue Length",
+      "Instance": "*",
+      "MetricName": "windows_net_output_queue_length",
+      "MetricType": "gauge",
+      "Labels": {
+        "nic": "{instance}"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "System",
+      "CounterName": "Context Switches/sec",
+      "MetricName": "windows_system_context_switches_total",
+      "MetricType": "counter",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "System",
+      "CounterName": "Processor Queue Length",
+      "MetricName": "windows_system_processor_queue_length",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv4",
+      "CounterName": "Connections Established",
+      "MetricName": "windows_tcp_connections_established",
+      "MetricType": "gauge",
+      "Labels": {
+        "af": "ipv4"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv4",
+      "CounterName": "Connection Failures",
+      "MetricName": "windows_tcp_connection_failures_total",
+      "MetricType": "counter",
+      "Labels": {
+        "af": "ipv4"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv4",
+      "CounterName": "Connections Reset",
+      "MetricName": "windows_tcp_connections_reset_total",
+      "MetricType": "counter",
+      "Labels": {
+        "af": "ipv4"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv4",
+      "CounterName": "Segments Retransmitted/sec",
+      "MetricName": "windows_tcp_segments_retransmitted_total",
+      "MetricType": "counter",
+      "Labels": {
+        "af": "ipv4"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv4",
+      "CounterName": "Segments Received/sec",
+      "MetricName": "windows_tcp_segments_received_total",
+      "MetricType": "counter",
+      "Labels": {
+        "af": "ipv4"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv4",
+      "CounterName": "Segments Sent/sec",
+      "MetricName": "windows_tcp_segments_sent_total",
+      "MetricType": "counter",
+      "Labels": {
+        "af": "ipv4"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv6",
+      "CounterName": "Connections Established",
+      "MetricName": "windows_tcp_connections_established",
+      "MetricType": "gauge",
+      "Labels": {
+        "af": "ipv6"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv6",
+      "CounterName": "Connection Failures",
+      "MetricName": "windows_tcp_connection_failures_total",
+      "MetricType": "counter",
+      "Labels": {
+        "af": "ipv6"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv6",
+      "CounterName": "Connections Reset",
+      "MetricName": "windows_tcp_connections_reset_total",
+      "MetricType": "counter",
+      "Labels": {
+        "af": "ipv6"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv6",
+      "CounterName": "Segments Retransmitted/sec",
+      "MetricName": "windows_tcp_segments_retransmitted_total",
+      "MetricType": "counter",
+      "Labels": {
+        "af": "ipv6"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv6",
+      "CounterName": "Segments Received/sec",
+      "MetricName": "windows_tcp_segments_received_total",
+      "MetricType": "counter",
+      "Labels": {
+        "af": "ipv6"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "TCPv6",
+      "CounterName": "Segments Sent/sec",
+      "MetricName": "windows_tcp_segments_sent_total",
+      "MetricType": "counter",
+      "Labels": {
+        "af": "ipv6"
+      },
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Cache",
+      "CounterName": "Data Map Hits %",
+      "MetricName": "windows_cache_data_map_hits_percent",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    },
+    {
+      "ObjectName": "Paging File",
+      "CounterName": "% Usage",
+      "Instance": "_Total",
+      "MetricName": "windows_pagefile_usage_peak",
+      "MetricType": "gauge",
+      "Labels": {},
+      "ValueMultiplier": 1.0
+    }
+  ],
+  "ServiceMonitors": [
+    {
+      "ServiceName": "EventLog",
+      "MetricName": "windows_service_state",
+      "MetricType": "gauge",
+      "Labels": {
+        "name": "EventLog"
+      },
+      "RunningStateValue": 1,
+      "StoppedStateValue": 0,
+      "Notes": "State values: 0=stopped, 1=running, 2=paused. Alert when NOT running."
+    },
+    {
+      "ServiceName": "Dhcp",
+      "MetricName": "windows_service_state",
+      "Labels": {
+        "name": "Dhcp"
+      }
+    },
+    {
+      "ServiceName": "Dnscache",
+      "MetricName": "windows_service_state",
+      "Labels": {
+        "name": "Dnscache"
+      }
+    },
+    {
+      "ServiceName": "PlugPlay",
+      "MetricName": "windows_service_state",
+      "Labels": {
+        "name": "PlugPlay"
+      }
+    },
+    {
+      "ServiceName": "RpcSs",
+      "MetricName": "windows_service_state",
+      "Labels": {
+        "name": "RpcSs"
+      }
+    },
+    {
+      "ServiceName": "LanmanServer",
+      "MetricName": "windows_service_state",
+      "Labels": {
+        "name": "LanmanServer"
+      }
+    },
+    {
+      "ServiceName": "lmhosts",
+      "MetricName": "windows_service_state",
+      "Labels": {
+        "name": "lmhosts"
+      }
+    },
+    {
+      "ServiceName": "LanmanWorkstation",
+      "MetricName": "windows_service_state",
+      "Labels": {
+        "name": "LanmanWorkstation"
+      }
+    },
+    {
+      "ServiceName": "MpsSvc",
+      "MetricName": "windows_service_state",
+      "Labels": {
+        "name": "MpsSvc"
+      }
+    },
+    {
+      "ServiceName": "WinRM",
+      "MetricName": "windows_service_state",
+      "Labels": {
+        "name": "WinRM"
+      }
+    },
+    {
+      "ServiceName": "Browser",
+      "MetricName": "windows_service_state",
+      "Labels": {
+        "name": "Browser"
+      }
+    }
+  ]
+}
