@@ -112,6 +112,7 @@ prometheus.scrape "scom_metrics" {
     },
   ]
   scrape_interval = "15s"
+  honor_labels = true
   forward_to      = [prometheus.remote_write.mimir.receiver]
 }
 
