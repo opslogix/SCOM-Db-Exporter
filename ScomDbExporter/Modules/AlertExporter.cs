@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
+using System.Net.Http;
+using System.Text;
+using Newtonsoft.Json;
 using ScomDbExporter.Config;
 using ScomDbExporter.Models;
 
@@ -13,6 +16,7 @@ namespace ScomDbExporter.Modules
 
         private readonly string _connString;
         private readonly AlertModuleToggle _settings;
+        private readonly HttpClient _httpClient = new();
 
         private DateTime _nextRunUtc = DateTime.MinValue;
 
@@ -164,6 +168,83 @@ WHERE @IncludeClosed = 1 OR a.ResolutionState <> 255;
 
             lock (_lock)
                 _changedAlerts = changed;
+
+            // Push changed alerts to Alloy
+            if (changed.Count > 0 && !string.IsNullOrEmpty(_settings.AlloyEndpoint))
+            {
+                PushToAlloy(changed);
+            }
+        }
+
+        private void PushToAlloy(List<AlertDto> alerts)
+        {
+            foreach (var alert in alerts)
+            {
+                try
+                {
+                    var json = SerializeAlert(alert);
+                    var content = new StringContent(json, Encoding.UTF8, "application/json");
+                    var response = _httpClient.PostAsync(_settings.AlloyEndpoint, content).Result;
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        // Log error but continue processing other alerts
+                        System.Diagnostics.Debug.WriteLine(
+                            $"Failed to push alert {alert.AlertId} to Alloy: {response.StatusCode}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine(
+                        $"Exception pushing alert {alert.AlertId} to Alloy: {ex.Message}");
+                }
+            }
+        }
+
+        private static string SerializeAlert(AlertDto a)
+        {
+            var obj = new
+            {
+                alert_id = a.AlertId.ToString(),
+                alert_name = a.AlertName,
+                alert_description = a.AlertDescription,
+                severity = a.Severity,
+                severity_text = a.SeverityText,
+                priority = a.Priority,
+                resolution_state = a.ResolutionState,
+                resolution_state_text = a.ResolutionStateText,
+                category = a.Category,
+                time_raised = FormatDate(a.TimeRaised),
+                time_added = FormatDate(a.TimeAdded),
+                last_modified = FormatDate(a.LastModified),
+                time_resolved = a.TimeResolved.HasValue ? FormatDate(a.TimeResolved.Value) : null,
+                repeat_count = a.RepeatCount,
+                owner = a.Owner,
+                resolved_by = a.ResolvedBy,
+                ticket_id = a.TicketId,
+                context = a.Context,
+                custom_field_1 = a.CustomField1,
+                custom_field_2 = a.CustomField2,
+                custom_field_3 = a.CustomField3,
+                custom_field_4 = a.CustomField4,
+                custom_field_5 = a.CustomField5,
+                custom_field_6 = a.CustomField6,
+                custom_field_7 = a.CustomField7,
+                custom_field_8 = a.CustomField8,
+                custom_field_9 = a.CustomField9,
+                custom_field_10 = a.CustomField10,
+                entity_display_name = a.EntityDisplayName,
+                entity_full_name = a.EntityFullName,
+                is_monitor_alert = a.IsMonitorAlert,
+                connector_id = a.ConnectorId?.ToString()
+            };
+
+            return JsonConvert.SerializeObject(obj);
+        }
+
+        private static string FormatDate(DateTime dt)
+        {
+            return dt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
         }
 
         private List<AlertDto> GetChangedAlerts(List<AlertDto> current)

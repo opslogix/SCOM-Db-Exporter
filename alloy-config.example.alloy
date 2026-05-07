@@ -1,0 +1,127 @@
+// Alloy configuration for receiving SCOM alerts and pushing to Loki
+// Copy this file and adjust the URLs for your environment
+//
+// ARCHITECTURE:
+// The SCOM exporter PUSHES alerts to Alloy (not the other way around).
+// Configure the exporter's AlloyEndpoint setting to point to this listener.
+
+// =============================================================================
+// SCOM Alerts Receiver (Push-based)
+// =============================================================================
+
+// Listen for pushed alerts from SCOM exporter
+// The exporter's AlloyEndpoint should be: http://<alloy-host>:9465/loki/api/v1/raw
+loki.source.api "scom_alerts" {
+  http {
+    listen_address = "127.0.0.1"
+    listen_port    = 9465
+  }
+  forward_to = [loki.process.scom_alerts.receiver]
+}
+
+// =============================================================================
+// Log Processing Pipeline
+// =============================================================================
+
+loki.process "scom_alerts" {
+  forward_to = [loki.write.default.receiver]
+
+  // Parse the JSON log line
+  stage.json {
+    expressions = {
+      // Extract fields for labeling (LOW CARDINALITY ONLY!)
+      severity    = "severity_text",
+      state       = "resolution_state_text",
+      category    = "category",
+      entity      = "entity_display_name",
+
+      // Extract timestamp for proper ordering
+      time_raised = "time_raised",
+    }
+  }
+
+  // Set labels - ONLY low-cardinality fields!
+  // WARNING: Do NOT add alert_id, alert_name, or other high-cardinality fields as labels
+  stage.labels {
+    values = {
+      severity = "",
+      state    = "",
+      category = "",
+      // Note: entity_display_name could be high-cardinality in large environments
+      // Consider removing if you have thousands of monitored entities
+      entity   = "",
+    }
+  }
+
+  // Add static labels for identification
+  stage.static_labels {
+    values = {
+      source = "scom",
+      job    = "scom-alerts",
+    }
+  }
+
+  // Use time_raised as the log timestamp (optional)
+  // This ensures alerts are ordered by when they were raised, not when scraped
+  stage.timestamp {
+    source = "time_raised"
+    format = "2006-01-02T15:04:05.000Z"  // Go time format for ISO 8601
+  }
+}
+
+// =============================================================================
+// Loki Writer
+// =============================================================================
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+
+    // Uncomment for basic auth
+    // basic_auth {
+    //   username = "admin"
+    //   password = "secret"
+    // }
+
+    // Uncomment for Grafana Cloud
+    // basic_auth {
+    //   username = "<your-grafana-cloud-user-id>"
+    //   password = "<your-grafana-cloud-api-key>"
+    // }
+  }
+}
+
+// =============================================================================
+// Debug Endpoint
+// =============================================================================
+// The SCOM exporter also exposes a /alerts/ HTTP endpoint for debugging.
+// You can view the current batch of changed alerts at:
+//   http://localhost:9464/alerts/
+//
+// This is useful for troubleshooting but is NOT used for Loki ingestion.
+// The exporter pushes alerts directly to Alloy - no scraping needed.
+// =============================================================================
+
+// =============================================================================
+// Label Cardinality Guidelines
+// =============================================================================
+//
+// SAFE as labels (low cardinality):
+//   - severity_text: 4 values (Information, Warning, Critical, Unknown)
+//   - resolution_state_text: ~10 values (New, Closed, Custom_*)
+//   - category: Limited set of SCOM categories
+//   - source: Static "scom"
+//   - job: Static "scom-alerts"
+//
+// DANGEROUS as labels (high cardinality - keep in log body):
+//   - alert_id: Unique per alert (NEVER use as label!)
+//   - alert_name: Many different alert types
+//   - alert_description: Free text
+//   - entity_display_name: Could be thousands of servers
+//   - entity_full_name: Even more unique
+//   - ticket_id: External ticket numbers
+//   - owner: User names
+//   - context: XML blob
+//   - custom_field_*: Unknown cardinality
+//
+// =============================================================================

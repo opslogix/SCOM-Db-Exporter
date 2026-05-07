@@ -30,5 +30,6 @@
     {
         public bool IncludeClosedAlerts { get; set; } = false;
         public int ClosedAlertRetentionMinutes { get; set; } = 60;
+        public string AlloyEndpoint { get; set; } = "http://localhost:9465/loki/api/v1/raw";
     }
 }
