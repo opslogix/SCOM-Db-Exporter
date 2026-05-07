@@ -7,6 +7,10 @@
 ##
 ## Get latest from https://github.com/github/gitignore/blob/main/Dotnet.gitignore
 
+# Local tooling
+.tools/
+.claude/
+
 # Build results
 [Dd]ebug/
 [Dd]ebugPublic/

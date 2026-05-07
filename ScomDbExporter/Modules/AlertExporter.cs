@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
+using System.Diagnostics;
 using System.Net.Http;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using ScomDbExporter.Config;
 using ScomDbExporter.Models;
@@ -16,6 +18,7 @@ namespace ScomDbExporter.Modules
 
         private readonly string _connString;
         private readonly AlertModuleToggle _settings;
+        private readonly ILogger<AlertExporter> _log;
         private readonly HttpClient _httpClient = new();
 
         private DateTime _nextRunUtc = DateTime.MinValue;
@@ -38,15 +41,16 @@ namespace ScomDbExporter.Modules
             }
         }
 
-        public AlertExporter(string connString, AlertModuleToggle settings)
+        public AlertExporter(string connString, AlertModuleToggle settings, ILogger<AlertExporter> log)
         {
             _connString = connString;
             _settings = settings ?? new AlertModuleToggle();
+            _log = log;
         }
 
         public void Init()
         {
-            // Initial load on startup
+            _log.LogDebug("Initial alert refresh on startup");
             RefreshAlerts();
         }
 
@@ -100,10 +104,12 @@ WHERE @IncludeClosed = 1 OR a.ResolutionState <> 255;
 ";
 
             var allAlerts = new List<AlertDto>();
+            var sw = Stopwatch.StartNew();
 
-            using (var conn = new SqlConnection(_connString))
-            using (var cmd = new SqlCommand(sql, conn))
+            try
             {
+                using var conn = new SqlConnection(_connString);
+                using var cmd = new SqlCommand(sql, conn);
                 cmd.Parameters.AddWithValue("@IncludeClosed", _settings.IncludeClosedAlerts ? 1 : 0);
 
                 conn.Open();
@@ -162,22 +168,39 @@ WHERE @IncludeClosed = 1 OR a.ResolutionState <> 255;
                     });
                 }
             }
+            catch (SqlException ex)
+            {
+                _log.LogError(ex, "Alert SQL query failed after {ElapsedMs}ms", sw.ElapsedMilliseconds);
+                return;
+            }
 
-            // Apply dedup logic
+            _log.LogDebug(
+                "Loaded {RowCount} alerts from SQL in {ElapsedMs}ms",
+                allAlerts.Count,
+                sw.ElapsedMilliseconds);
+
             var changed = GetChangedAlerts(allAlerts);
 
             lock (_lock)
                 _changedAlerts = changed;
 
-            // Push changed alerts to Alloy
-            if (changed.Count > 0 && !string.IsNullOrEmpty(_settings.AlloyEndpoint))
+            if (changed.Count > 0)
             {
-                PushToAlloy(changed);
+                _log.LogDebug("{ChangedCount} changed alerts detected", changed.Count);
+
+                if (!string.IsNullOrEmpty(_settings.AlloyEndpoint))
+                {
+                    PushToAlloy(changed);
+                }
             }
         }
 
         private void PushToAlloy(List<AlertDto> alerts)
         {
+            int success = 0;
+            int failed = 0;
+            var sw = Stopwatch.StartNew();
+
             foreach (var alert in alerts)
             {
                 try
@@ -186,19 +209,33 @@ WHERE @IncludeClosed = 1 OR a.ResolutionState <> 255;
                     var content = new StringContent(json, Encoding.UTF8, "application/json");
                     var response = _httpClient.PostAsync(_settings.AlloyEndpoint, content).Result;
 
-                    if (!response.IsSuccessStatusCode)
+                    if (response.IsSuccessStatusCode)
                     {
-                        // Log error but continue processing other alerts
-                        System.Diagnostics.Debug.WriteLine(
-                            $"Failed to push alert {alert.AlertId} to Alloy: {response.StatusCode}");
+                        success++;
+                        _log.LogTrace(
+                            "Pushed alert {AlertId} to Alloy ({StatusCode})",
+                            alert.AlertId, (int)response.StatusCode);
+                    }
+                    else
+                    {
+                        failed++;
+                        _log.LogWarning(
+                            "Alloy rejected alert {AlertId}: {StatusCode} {ReasonPhrase}",
+                            alert.AlertId, (int)response.StatusCode, response.ReasonPhrase);
                     }
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine(
-                        $"Exception pushing alert {alert.AlertId} to Alloy: {ex.Message}");
+                    failed++;
+                    _log.LogError(ex,
+                        "Exception pushing alert {AlertId} to Alloy at {Endpoint}",
+                        alert.AlertId, _settings.AlloyEndpoint);
                 }
             }
+
+            _log.LogDebug(
+                "Alloy push completed: {Success} succeeded, {Failed} failed in {ElapsedMs}ms",
+                success, failed, sw.ElapsedMilliseconds);
         }
 
         private static string SerializeAlert(AlertDto a)
