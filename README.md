@@ -49,7 +49,8 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
       "Enabled": true,
       "PollSeconds": 30,
       "IncludeClosedAlerts": false,
-      "ClosedAlertRetentionMinutes": 60
+      "ClosedAlertRetentionMinutes": 60,
+      "AlloyEndpoint": "http://localhost:9465/loki/api/v1/raw"
     }
   }
 }
@@ -75,6 +76,17 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
 |  | `PollSeconds` | How often to query SCOM for alert changes |
 |  | `IncludeClosedAlerts` | Include closed alerts (ResolutionState=255) in queries |
 |  | `ClosedAlertRetentionMinutes` | How long to track closed alerts before removing from memory |
+|  | `AlloyEndpoint` | URL of Alloy's loki.source.api endpoint for pushing alerts |
+
+### Logging Settings
+
+The `Serilog` section configures runtime logging. See the [Logging](#logging) section below for what each level emits and how to view Service logs.
+
+| Setting | Description |
+|---------|-------------|
+| `Serilog.MinimumLevel.Default` | Minimum level emitted: `Verbose`, `Debug`, `Information` (default), `Warning`, `Error`, `Fatal` |
+| `Serilog.MinimumLevel.Override` | Per-namespace level overrides, e.g. `"Microsoft": "Warning"` mutes framework noise |
+| `Serilog.Enrich` | Serilog enrichers applied to every event (default: `"FromLogContext"`) |
 
 ## Networking & Endpoints
 
