@@ -1,4 +1,4 @@
-﻿using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging;
 using ScomDbExporter.Config;
 using ScomDbExporter.Http;
 using ScomDbExporter.Modules;
@@ -11,6 +11,7 @@ namespace ScomDbExporter.Core
     public sealed class ExporterHost
     {
         private readonly AppConfig _config;
+        private readonly ILoggerFactory _loggerFactory;
         private readonly ILogger<ExporterHost> _log;
         private readonly List<IExporterModule> _modules = new();
 
@@ -19,27 +20,22 @@ namespace ScomDbExporter.Core
         private AlertHttpServer? _alertServer;
 
         private volatile bool _running;
-        private AppConfig cfg;
 
-        public ExporterHost(AppConfig config, ILogger<ExporterHost> log)
+        public ExporterHost(AppConfig config, ILoggerFactory loggerFactory)
         {
             _config = config;
-            _log = log;
-        }
-
-        public ExporterHost(AppConfig cfg)
-        {
-            this.cfg = cfg;
+            _loggerFactory = loggerFactory;
+            _log = loggerFactory.CreateLogger<ExporterHost>();
         }
 
         public void Start()
         {
             _log.LogInformation("Starting ScomDbExporter");
 
-            // metrics
             _metrics = new MetricsHttpServer(
                 _config.Http.Host,
-                _config.Http.Port);
+                _config.Http.Port,
+                _loggerFactory.CreateLogger<MetricsHttpServer>());
 
             _metrics.Start();
             _log.LogInformation(
@@ -47,63 +43,79 @@ namespace ScomDbExporter.Core
                 _config.Http.Host,
                 _config.Http.Port);
 
-            // modules
             var perf = new PerformanceExporter(
                 _config.ConnectionString,
-                _config.Modules.Metrics);
+                _config.Modules.Metrics,
+                _loggerFactory.CreateLogger<PerformanceExporter>());
 
             if (perf.Enabled)
             {
                 _modules.Add(perf);
-                _log.LogInformation("PerformanceExporter enabled");
+                _log.LogInformation("PerformanceExporter enabled (PollSeconds={PollSeconds})",
+                    _config.Modules.Metrics.PollSeconds);
             }
 
             var state = new StateExporter(
                 _config.ConnectionString,
-                _config.Modules.State);
+                _config.Modules.State,
+                _loggerFactory.CreateLogger<StateExporter>());
 
             if (state.Enabled)
             {
                 _modules.Add(state);
-                _log.LogInformation("StateExporter enabled");
+                _log.LogInformation("StateExporter enabled (PollSeconds={PollSeconds})",
+                    _config.Modules.State.PollSeconds);
             }
 
             var alert = new AlertExporter(
                 _config.ConnectionString,
-                _config.Modules.Alert);
+                _config.Modules.Alert,
+                _loggerFactory.CreateLogger<AlertExporter>());
 
             if (alert.Enabled)
             {
                 _modules.Add(alert);
-                _log.LogInformation("AlertExporter enabled");
+                _log.LogInformation(
+                    "AlertExporter enabled (PollSeconds={PollSeconds}, IncludeClosedAlerts={IncludeClosed}, AlloyEndpoint={AlloyEndpoint})",
+                    _config.Modules.Alert.PollSeconds,
+                    _config.Modules.Alert.IncludeClosedAlerts,
+                    _config.Modules.Alert.AlloyEndpoint ?? "(none)");
             }
 
             foreach (var m in _modules)
             {
                 _log.LogInformation("Initializing module {Module}", m.Name);
-                m.Init();
+                try
+                {
+                    m.Init();
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "Module {Module} initialization failed", m.Name);
+                    throw;
+                }
             }
 
-            // state endpoint
             if (state.Enabled)
             {
                 _stateServer = new StateHttpServer(
                     state,
-                    _config.Http.Port);
+                    _config.Http.Port,
+                    _loggerFactory.CreateLogger<StateHttpServer>());
 
                 _stateServer.Start();
-                _log.LogInformation("State endpoint started");
+                _log.LogInformation("State endpoint started on port {Port}/state", _config.Http.Port);
             }
 
-            // alert endpoint
             if (alert.Enabled)
             {
                 _alertServer = new AlertHttpServer(
                     alert,
-                    _config.Http.Port);
+                    _config.Http.Port,
+                    _loggerFactory.CreateLogger<AlertHttpServer>());
 
                 _alertServer.Start();
-                _log.LogInformation("Alert endpoint started");
+                _log.LogInformation("Alert endpoint started on port {Port}/alerts", _config.Http.Port);
             }
 
             _running = true;
@@ -119,7 +131,7 @@ namespace ScomDbExporter.Core
 
         private void MainLoop()
         {
-            _log.LogInformation("Main loop started");
+            _log.LogDebug("Main loop started");
 
             while (_running)
             {
@@ -141,7 +153,7 @@ namespace ScomDbExporter.Core
                 Thread.Sleep(250);
             }
 
-            _log.LogInformation("Main loop stopped");
+            _log.LogDebug("Main loop stopped");
         }
 
         public void Stop()
@@ -149,9 +161,6 @@ namespace ScomDbExporter.Core
             _log.LogInformation("Stopping ScomDbExporter");
 
             _running = false;
-
-            // _metrics?.Stop();
-            // _stateServer?.Stop();
 
             _log.LogInformation("ScomDbExporter stopped");
         }

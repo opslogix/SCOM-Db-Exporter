@@ -1,7 +1,9 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 using ScomDbExporter.Modules;
 
 namespace ScomDbExporter.Http
@@ -10,10 +12,12 @@ namespace ScomDbExporter.Http
     {
         private readonly HttpListener _listener = new();
         private readonly StateExporter _state;
+        private readonly ILogger<StateHttpServer> _log;
 
-        public StateHttpServer(StateExporter state, int port)
+        public StateHttpServer(StateExporter state, int port, ILogger<StateHttpServer> log)
         {
             _state = state;
+            _log = log;
             _listener.Prefixes.Add($"http://+:{port}/state/");
         }
 
@@ -30,6 +34,7 @@ namespace ScomDbExporter.Http
                 try
                 {
                     var ctx = _listener.GetContext();
+                    var sw = Stopwatch.StartNew();
                     var text = RenderPrometheusText();
 
                     byte[] data = Encoding.UTF8.GetBytes(text);
@@ -38,10 +43,14 @@ namespace ScomDbExporter.Http
                     ctx.Response.ContentLength64 = data.Length;
                     ctx.Response.OutputStream.Write(data, 0, data.Length);
                     ctx.Response.OutputStream.Close();
+
+                    _log.LogDebug(
+                        "Served /state ({Bytes} bytes) to {RemoteEndPoint} in {ElapsedMs}ms",
+                        data.Length, ctx.Request.RemoteEndPoint, sw.ElapsedMilliseconds);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // keep server alive
+                    _log.LogWarning(ex, "State endpoint request failed");
                 }
             }
         }

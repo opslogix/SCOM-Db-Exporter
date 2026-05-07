@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
+using System.Diagnostics;
+using Microsoft.Extensions.Logging;
 using ScomDbExporter.Config;
 using ScomDbExporter.Models;
 
@@ -13,6 +15,7 @@ namespace ScomDbExporter.Modules
 
         private readonly string _connString;
         private readonly ModuleToggle _settings;
+        private readonly ILogger<StateExporter> _log;
 
         private DateTime _nextRunUtc = DateTime.MinValue;
         private Guid _entityStateMonitorId;
@@ -30,15 +33,19 @@ namespace ScomDbExporter.Modules
             }
         }
 
-        public StateExporter(string connString, ModuleToggle settings)
+        public StateExporter(string connString, ModuleToggle settings, ILogger<StateExporter> log)
         {
             _connString = connString;
             _settings = settings ?? new ModuleToggle();
+            _log = log;
         }
 
         public void Init()
         {
             _entityStateMonitorId = LoadEntityStateMonitorId();
+            _log.LogInformation(
+                "StateExporter init complete: EntityStateMonitorId={MonitorId}",
+                _entityStateMonitorId);
         }
 
         public void Tick()
@@ -65,35 +72,48 @@ WHERE s.MonitorId = @MonitorId
 ";
 
             var list = new List<EntityStateDto>();
+            var sw = Stopwatch.StartNew();
 
-            using var conn = new SqlConnection(_connString);
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@MonitorId", _entityStateMonitorId);
-
-            conn.Open();
-            using var r = cmd.ExecuteReader();
-
-            while (r.Read())
+            try
             {
-                int hs = r.IsDBNull(2) ? 0 : Convert.ToInt32(r.GetValue(2));
+                using var conn = new SqlConnection(_connString);
+                using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@MonitorId", _entityStateMonitorId);
 
-                list.Add(new EntityStateDto
+                conn.Open();
+                using var r = cmd.ExecuteReader();
+
+                while (r.Read())
                 {
-                    DisplayName = r.IsDBNull(0) ? "" : r.GetString(0),
-                    FullName = r.IsDBNull(1) ? "" : r.GetString(1),
-                    HealthState = hs,
-                    HealthText = hs switch
+                    int hs = r.IsDBNull(2) ? 0 : Convert.ToInt32(r.GetValue(2));
+
+                    list.Add(new EntityStateDto
                     {
-                        1 => "Healthy",
-                        2 => "Warning",
-                        3 => "Critical",
-                        _ => "Unknown"
-                    }
-                });
+                        DisplayName = r.IsDBNull(0) ? "" : r.GetString(0),
+                        FullName = r.IsDBNull(1) ? "" : r.GetString(1),
+                        HealthState = hs,
+                        HealthText = hs switch
+                        {
+                            1 => "Healthy",
+                            2 => "Warning",
+                            3 => "Critical",
+                            _ => "Unknown"
+                        }
+                    });
+                }
+            }
+            catch (SqlException ex)
+            {
+                _log.LogError(ex, "State refresh SQL query failed after {ElapsedMs}ms", sw.ElapsedMilliseconds);
+                return;
             }
 
             lock (_lock)
                 _latestState = list;
+
+            _log.LogDebug(
+                "Refreshed {RowCount} entity states in {ElapsedMs}ms",
+                list.Count, sw.ElapsedMilliseconds);
         }
 
         private Guid LoadEntityStateMonitorId()

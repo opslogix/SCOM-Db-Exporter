@@ -1,7 +1,9 @@
 using System;
+using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using ScomDbExporter.Modules;
 
@@ -11,10 +13,12 @@ namespace ScomDbExporter.Http
     {
         private readonly HttpListener _listener = new();
         private readonly AlertExporter _alert;
+        private readonly ILogger<AlertHttpServer> _log;
 
-        public AlertHttpServer(AlertExporter alert, int port)
+        public AlertHttpServer(AlertExporter alert, int port, ILogger<AlertHttpServer> log)
         {
             _alert = alert;
+            _log = log;
             _listener.Prefixes.Add($"http://+:{port}/alerts/");
         }
 
@@ -31,6 +35,7 @@ namespace ScomDbExporter.Http
                 try
                 {
                     var ctx = _listener.GetContext();
+                    var sw = Stopwatch.StartNew();
                     var json = RenderJson();
 
                     byte[] data = Encoding.UTF8.GetBytes(json);
@@ -39,10 +44,14 @@ namespace ScomDbExporter.Http
                     ctx.Response.ContentLength64 = data.Length;
                     ctx.Response.OutputStream.Write(data, 0, data.Length);
                     ctx.Response.OutputStream.Close();
+
+                    _log.LogDebug(
+                        "Served /alerts ({Bytes} bytes) to {RemoteEndPoint} in {ElapsedMs}ms",
+                        data.Length, ctx.Request.RemoteEndPoint, sw.ElapsedMilliseconds);
                 }
-                catch
+                catch (Exception ex)
                 {
-                    // keep server alive
+                    _log.LogWarning(ex, "Alert endpoint request failed");
                 }
             }
         }

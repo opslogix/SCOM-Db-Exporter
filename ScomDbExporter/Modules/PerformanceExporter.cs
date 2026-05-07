@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
+using System.Diagnostics;
 using System.IO;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Prometheus;
 using ScomDbExporter.Config;
@@ -16,6 +18,7 @@ namespace ScomDbExporter.Modules
 
         private readonly string _connString;
         private readonly ModuleToggle _settings;
+        private readonly ILogger<PerformanceExporter> _log;
 
         private DateTime _nextRunUtc = DateTime.MinValue;
         private DateTime _lastSyncTime = DateTime.UtcNow.AddMinutes(-5);
@@ -38,13 +41,14 @@ namespace ScomDbExporter.Modules
                 LabelNames = new[] { "object", "counter", "entity", "instance" }
             });
 
-        public PerformanceExporter(string connString, ModuleToggle settings)
+        public PerformanceExporter(string connString, ModuleToggle settings, ILogger<PerformanceExporter> log)
         {
             if (string.IsNullOrWhiteSpace(connString))
                 throw new ArgumentException("Connection string is null or empty", nameof(connString));
 
             _connString = connString;
             _settings = settings ?? new ModuleToggle();
+            _log = log;
         }
 
         public void Init()
@@ -52,6 +56,10 @@ namespace ScomDbExporter.Modules
             LoadMappings();
             LoadCounters();
             LoadEntities();
+
+            _log.LogInformation(
+                "PerformanceExporter init complete: {MappingCount} mappings, {MetricDefs} metric defs, {CounterCount} counters, {EntityCount} entities",
+                _mappingIndex.Count, _metricDefs.Count, _counters.Count, _entities.Count);
         }
 
         public void Tick()
@@ -199,15 +207,21 @@ JOIN dbo.PerformanceSource ps WITH (NOLOCK)
 WHERE p.TimeSampled > @LastSync
   AND p.SampleValue IS NOT NULL;";
 
-            using var conn = new SqlConnection(_connString);
-            using var cmd = new SqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@LastSync", _lastSyncTime);
+            var sw = Stopwatch.StartNew();
+            int rowCount = 0;
 
-            conn.Open();
-            using var r = cmd.ExecuteReader();
-
-            while (r.Read())
+            try
             {
+                using var conn = new SqlConnection(_connString);
+                using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@LastSync", _lastSyncTime);
+
+                conn.Open();
+                using var r = cmd.ExecuteReader();
+
+                while (r.Read())
+                {
+                    rowCount++;
                 int sourceId = r.GetInt32(0);
                 double val = r.GetDouble(1);
                 DateTime ts = r.GetDateTime(2);
@@ -228,7 +242,19 @@ WHERE p.TimeSampled > @LastSync
 
                 if (ts > _lastSyncTime)
                     _lastSyncTime = ts;
+                }
             }
+            catch (SqlException ex)
+            {
+                _log.LogError(ex,
+                    "Performance poll SQL query failed after {ElapsedMs}ms",
+                    sw.ElapsedMilliseconds);
+                return;
+            }
+
+            _log.LogDebug(
+                "Polled {RowCount} performance rows in {ElapsedMs}ms (lastSync={LastSync:O})",
+                rowCount, sw.ElapsedMilliseconds, _lastSyncTime);
         }
 
         // -------------------------------

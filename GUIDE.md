@@ -21,6 +21,16 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
 ```json
 {
   "ConnectionString": "Data Source=your-sql-server;Initial Catalog=OperationsManager;Integrated Security=True;",
+  "Serilog": {
+    "MinimumLevel": {
+      "Default": "Information",
+      "Override": {
+        "Microsoft": "Warning",
+        "System": "Warning"
+      }
+    },
+    "Enrich": [ "FromLogContext" ]
+  },
   "Http": {
     "Host": "localhost",
     "Port": 9464
@@ -81,6 +91,45 @@ You can access the endpoints locally via:
 - http://localhost:9464/metrics
 - http://localhost:9464/state
 - http://localhost:9464/alerts
+
+## Logging
+
+Both executables use [Serilog](https://serilog.net/) configured via the `Serilog` section in `appsettings.json`.
+
+| Host | Sink | Where to look |
+|------|------|---------------|
+| `ScomDbExporter.Console.exe` | Console | stdout (the terminal window) |
+| `ScomDbExporter.Service.exe` | Windows Event Log | **Application** log, source `ScomDbExporter` |
+
+The Service writes to the existing Windows **Application** log — no new log is created. The first time the service starts it registers its event source (`ScomDbExporter`) automatically; this requires the service account to have administrator rights on first launch only.
+
+### Changing the log level
+
+Edit `Serilog.MinimumLevel.Default` in `appsettings.json`. Restart the host to apply.
+
+| Level | Use case |
+|-------|----------|
+| `Information` (default) | Normal operation: lifecycle events, module init, errors |
+| `Debug` | Troubleshooting: per-poll row counts and elapsed ms, per-request HTTP traces, Alloy push tallies |
+| `Verbose` | Very chatty: per-alert Alloy POST traces |
+
+You can also override per namespace via `Serilog.MinimumLevel.Override`, e.g. set only the Alert module to `Debug`:
+
+```json
+"Override": {
+  "Microsoft": "Warning",
+  "System": "Warning",
+  "ScomDbExporter.Modules.AlertExporter": "Debug"
+}
+```
+
+### Viewing Service logs
+
+Open **Event Viewer** → **Windows Logs** → **Application**, then filter by source `ScomDbExporter`. From PowerShell:
+
+```powershell
+Get-EventLog -LogName Application -Source ScomDbExporter -Newest 50
+```
 
 ## Alert Module Details
 
