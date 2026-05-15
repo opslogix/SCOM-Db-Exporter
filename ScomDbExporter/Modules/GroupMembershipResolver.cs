@@ -120,8 +120,6 @@ namespace ScomDbExporter.Modules
                 for (int i = 0; i < _allConfiguredNames.Count; i++)
                     cmd.Parameters.AddWithValue("@g" + i, _allConfiguredNames[i]);
 
-                cmd.Parameters.AddWithValue("@MaxDepth", Math.Max(1, _config.MaxNestedDepth));
-
                 conn.Open();
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
@@ -184,24 +182,11 @@ WITH RootGroups AS (
             sb.Append(string.Join(", ", paramList));
             sb.Append(@")
 ),
-NestedGroups AS (
-    SELECT rg.BaseManagedEntityId, rg.DisplayName AS GroupName, 0 AS Depth
-    FROM RootGroups rg
-    UNION ALL
-    SELECT r.TargetEntityId, ng.GroupName, ng.Depth + 1
-    FROM NestedGroups ng
-    JOIN dbo.Relationship r WITH (NOLOCK)
-        ON r.SourceEntityId = ng.BaseManagedEntityId
-       AND r.IsDeleted = 0
-    JOIN dbo.MTV_Group mg WITH (NOLOCK)
-        ON mg.BaseManagedEntityId = r.TargetEntityId
-    WHERE ng.Depth < @MaxDepth
-),
 DirectMembers AS (
-    SELECT DISTINCT ng.GroupName, r.TargetEntityId AS BmeId
-    FROM NestedGroups ng
+    SELECT DISTINCT rg.DisplayName AS GroupName, r.TargetEntityId AS BmeId
+    FROM RootGroups rg
     JOIN dbo.Relationship r WITH (NOLOCK)
-        ON r.SourceEntityId = ng.BaseManagedEntityId
+        ON r.SourceEntityId = rg.BaseManagedEntityId
        AND r.IsDeleted = 0
     JOIN dbo.BaseManagedEntity tbme WITH (NOLOCK)
         ON tbme.BaseManagedEntityId = r.TargetEntityId
@@ -220,8 +205,7 @@ JOIN dbo.BaseManagedEntity hosted WITH (NOLOCK)
    AND hosted.IsDeleted = 0");
             }
 
-            sb.Append(@"
-OPTION (MAXRECURSION 32);");
+            sb.Append(@";");
             return sb.ToString();
         }
     }

@@ -18,9 +18,12 @@ namespace ScomDbExporter.Modules
         private readonly GroupMembershipResolver _resolver;
         private readonly ILogger<StateExporter> _log;
 
+        // SQL datetime floor is 1753-01-01; keep the incremental sentinel above it.
+        private static readonly DateTime SqlSafeMin = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
         private DateTime _nextRunUtc = DateTime.MinValue;
         private DateTime _nextFullReconcileUtc = DateTime.MinValue;
-        private DateTime _lastSyncTime = DateTime.MinValue;
+        private DateTime _lastSyncTime = SqlSafeMin;
         private Guid _entityStateMonitorId;
 
         private readonly object _lock = new();

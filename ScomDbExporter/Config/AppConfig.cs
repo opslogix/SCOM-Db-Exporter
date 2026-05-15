@@ -49,9 +49,6 @@ namespace ScomDbExporter.Config
         // operation introduced by grouping; keep this rare.
         public int RefreshMinutes { get; set; } = 15;
 
-        // Cap for nested-group traversal depth. Most SCOM topologies need <= 8.
-        public int MaxNestedDepth { get; set; } = 8;
-
         // When true, includes all entities whose TopLevelHostEntity is a group member.
         // Typical use: filter by a "Servers" group and pick up CPU/Disk/Process child
         // entities hosted by those servers.

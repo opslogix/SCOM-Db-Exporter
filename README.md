@@ -38,7 +38,6 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
   },
   "GroupResolver": {
     "RefreshMinutes": 15,
-    "MaxNestedDepth": 8,
     "IncludeHostedChildren": true
   },
   "Modules": {
@@ -79,7 +78,6 @@ The `GroupResolver` block controls how SCOM group memberships are resolved when 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `GroupResolver.RefreshMinutes` | `15` | How often to re-resolve group membership against the SCOM DB. This is the only periodic group-related query — keep it relatively rare. |
-| `GroupResolver.MaxNestedDepth` | `8` | Maximum nesting depth when walking groups that contain groups. |
 | `GroupResolver.IncludeHostedChildren` | `true` | When `true`, automatically includes every entity whose `TopLevelHostEntity` is a group member. Lets a `Servers` group also match each server's CPU/disk/process child entities. |
 
 ### Module Settings
@@ -189,11 +187,11 @@ If every module's `Groups` is empty/omitted, the resolver does not run the SCOM 
 
 ### How it works
 
-- A shared `GroupMembershipResolver` resolves the configured group display names to a set of `BaseManagedEntityId`s using SCOM's `Relationship` table and `MTV_Group` view.
+- A shared `GroupMembershipResolver` resolves the configured group display names to a set of `BaseManagedEntityId`s using SCOM's `BaseManagedEntity` and `Relationship` tables — no dependency on optional views.
 - Resolution runs once at startup and again every `GroupResolver.RefreshMinutes` — this is the only periodic group-related SQL query the exporter issues.
 - Each module's poll fetches data as usual and then filters in-memory against the cached BME set. Filtering does **not** add cost to the per-poll SCOM query.
-- Nested groups (groups that contain other groups) are expanded up to `GroupResolver.MaxNestedDepth` levels.
 - If `GroupResolver.IncludeHostedChildren` is `true` (default), every entity whose `TopLevelHostEntity` is a group member is also included. This is what makes filtering by a `Servers` group naturally pick up that server's CPU, disk, OS, and process child entities — which is normally where the perf data and child-monitor state lives.
+- **Nested groups are not transitively expanded** — only direct members of the named groups (plus their hosted children) are included. If you have a parent group whose only members are other groups, list the child groups explicitly in `Groups`.
 
 If multiple modules reference different groups, they are resolved together — one DB round-trip per refresh, regardless of how many modules use grouping.
 

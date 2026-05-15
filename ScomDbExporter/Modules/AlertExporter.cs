@@ -22,8 +22,12 @@ namespace ScomDbExporter.Modules
         private readonly ILogger<AlertExporter> _log;
         private readonly HttpClient _httpClient = new();
 
+        // SQL datetime floor is 1753-01-01; use a safely-typed sentinel so the
+        // bootstrap query fetches all currently-open alerts.
+        private static readonly DateTime SqlSafeMin = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
         private DateTime _nextRunUtc = DateTime.MinValue;
-        private DateTime _lastSyncTime = DateTime.MinValue;
+        private DateTime _lastSyncTime = SqlSafeMin;
 
         private readonly object _lock = new();
         private List<AlertDto> _changedAlerts = new();
