@@ -18,19 +18,15 @@ namespace ScomDbExporter.Modules
 
         private readonly string _connString;
         private readonly AlertModuleToggle _settings;
+        private readonly GroupMembershipResolver _resolver;
         private readonly ILogger<AlertExporter> _log;
         private readonly HttpClient _httpClient = new();
 
         private DateTime _nextRunUtc = DateTime.MinValue;
+        private DateTime _lastSyncTime = DateTime.MinValue;
 
-        // Thread-safe snapshot
         private readonly object _lock = new();
         private List<AlertDto> _changedAlerts = new();
-
-        // Dedup tracking: AlertId -> LastModified timestamp
-        private readonly Dictionary<Guid, DateTime> _lastSeen = new();
-        // Track when closed alerts were first seen as closed
-        private readonly Dictionary<Guid, DateTime> _closedAt = new();
 
         public IReadOnlyList<AlertDto> CurrentAlerts
         {
@@ -41,16 +37,22 @@ namespace ScomDbExporter.Modules
             }
         }
 
-        public AlertExporter(string connString, AlertModuleToggle settings, ILogger<AlertExporter> log)
+        public AlertExporter(
+            string connString,
+            AlertModuleToggle settings,
+            GroupMembershipResolver resolver,
+            ILogger<AlertExporter> log)
         {
             _connString = connString;
             _settings = settings ?? new AlertModuleToggle();
+            _resolver = resolver;
             _log = log;
         }
 
         public void Init()
         {
-            _log.LogDebug("Initial alert refresh on startup");
+            _log.LogDebug("Initial alert load on startup");
+            // First poll is a full load (LastSync = MinValue), then we stay incremental.
             RefreshAlerts();
         }
 
@@ -59,12 +61,14 @@ namespace ScomDbExporter.Modules
             if (DateTime.UtcNow < _nextRunUtc)
                 return;
 
-            _nextRunUtc = DateTime.UtcNow.AddSeconds(_settings.PollSeconds);
+            _nextRunUtc = DateTime.UtcNow.AddSeconds(Math.Max(1, _settings.PollSeconds));
             RefreshAlerts();
         }
 
         private void RefreshAlerts()
         {
+            // Incremental on LastModified; first call after startup has _lastSyncTime=MinValue
+            // and therefore fetches all currently-open alerts (the bootstrap snapshot).
             const string sql = @"
 SELECT
     a.AlertId,
@@ -95,21 +99,25 @@ SELECT
     a.CustomField10,
     a.IsMonitorAlert,
     a.ConnectorId,
+    a.BaseManagedEntityId,
     bme.DisplayName,
     bme.FullName
 FROM dbo.Alert a WITH (NOLOCK)
 LEFT JOIN dbo.BaseManagedEntity bme WITH (NOLOCK)
     ON a.BaseManagedEntityId = bme.BaseManagedEntityId
-WHERE @IncludeClosed = 1 OR a.ResolutionState <> 255;
+WHERE a.LastModified > @LastSync
+  AND (@IncludeClosed = 1 OR a.ResolutionState <> 255);
 ";
 
-            var allAlerts = new List<AlertDto>();
+            var changes = new List<AlertDto>();
+            DateTime maxLastMod = _lastSyncTime;
             var sw = Stopwatch.StartNew();
 
             try
             {
                 using var conn = new SqlConnection(_connString);
                 using var cmd = new SqlCommand(sql, conn);
+                cmd.Parameters.AddWithValue("@LastSync", _lastSyncTime);
                 cmd.Parameters.AddWithValue("@IncludeClosed", _settings.IncludeClosedAlerts ? 1 : 0);
 
                 conn.Open();
@@ -117,55 +125,10 @@ WHERE @IncludeClosed = 1 OR a.ResolutionState <> 255;
 
                 while (r.Read())
                 {
-                    int severity = r.IsDBNull(3) ? 0 : Convert.ToInt32(r.GetValue(3));
-                    int resState = r.IsDBNull(5) ? 0 : Convert.ToInt32(r.GetValue(5));
-
-                    allAlerts.Add(new AlertDto
-                    {
-                        AlertId = r.GetGuid(0),
-                        AlertName = GetStringOrEmpty(r, 1),
-                        AlertDescription = GetStringOrEmpty(r, 2),
-                        Severity = severity,
-                        SeverityText = severity switch
-                        {
-                            0 => "Information",
-                            1 => "Warning",
-                            2 => "Critical",
-                            _ => "Unknown"
-                        },
-                        Priority = r.IsDBNull(4) ? 0 : Convert.ToInt32(r.GetValue(4)),
-                        ResolutionState = resState,
-                        ResolutionStateText = resState switch
-                        {
-                            0 => "New",
-                            255 => "Closed",
-                            _ => $"Custom_{resState}"
-                        },
-                        Category = GetStringOrEmpty(r, 6),
-                        TimeRaised = r.IsDBNull(7) ? DateTime.MinValue : r.GetDateTime(7),
-                        TimeAdded = r.IsDBNull(8) ? DateTime.MinValue : r.GetDateTime(8),
-                        LastModified = r.IsDBNull(9) ? DateTime.MinValue : r.GetDateTime(9),
-                        TimeResolved = r.IsDBNull(10) ? null : r.GetDateTime(10),
-                        RepeatCount = r.IsDBNull(11) ? 0 : Convert.ToInt32(r.GetValue(11)),
-                        Owner = GetStringOrEmpty(r, 12),
-                        ResolvedBy = GetStringOrEmpty(r, 13),
-                        TicketId = GetStringOrEmpty(r, 14),
-                        Context = GetStringOrEmpty(r, 15),
-                        CustomField1 = GetStringOrEmpty(r, 16),
-                        CustomField2 = GetStringOrEmpty(r, 17),
-                        CustomField3 = GetStringOrEmpty(r, 18),
-                        CustomField4 = GetStringOrEmpty(r, 19),
-                        CustomField5 = GetStringOrEmpty(r, 20),
-                        CustomField6 = GetStringOrEmpty(r, 21),
-                        CustomField7 = GetStringOrEmpty(r, 22),
-                        CustomField8 = GetStringOrEmpty(r, 23),
-                        CustomField9 = GetStringOrEmpty(r, 24),
-                        CustomField10 = GetStringOrEmpty(r, 25),
-                        IsMonitorAlert = !r.IsDBNull(26) && r.GetBoolean(26),
-                        ConnectorId = r.IsDBNull(27) ? null : r.GetGuid(27),
-                        EntityDisplayName = GetStringOrEmpty(r, 28),
-                        EntityFullName = GetStringOrEmpty(r, 29)
-                    });
+                    var dto = ReadRow(r);
+                    changes.Add(dto);
+                    if (dto.LastModified > maxLastMod)
+                        maxLastMod = dto.LastModified;
                 }
             }
             catch (SqlException ex)
@@ -175,24 +138,40 @@ WHERE @IncludeClosed = 1 OR a.ResolutionState <> 255;
             }
 
             _log.LogDebug(
-                "Loaded {RowCount} alerts from SQL in {ElapsedMs}ms",
-                allAlerts.Count,
-                sw.ElapsedMilliseconds);
+                "Loaded {RowCount} alert changes from SQL in {ElapsedMs}ms",
+                changes.Count, sw.ElapsedMilliseconds);
 
-            var changed = GetChangedAlerts(allAlerts);
+            var filtered = ApplyGroupFilter(changes);
 
             lock (_lock)
-                _changedAlerts = changed;
-
-            if (changed.Count > 0)
             {
-                _log.LogDebug("{ChangedCount} changed alerts detected", changed.Count);
+                _changedAlerts = filtered;
+                if (maxLastMod > _lastSyncTime)
+                    _lastSyncTime = maxLastMod;
+            }
+
+            if (filtered.Count > 0)
+            {
+                _log.LogDebug("{ChangedCount} alerts after filtering", filtered.Count);
 
                 if (!string.IsNullOrEmpty(_settings.AlloyEndpoint))
-                {
-                    PushToAlloy(changed);
-                }
+                    PushToAlloy(filtered);
             }
+        }
+
+        private List<AlertDto> ApplyGroupFilter(List<AlertDto> alerts)
+        {
+            var filter = _resolver?.GetAllowedBmes(_settings.Groups);
+            if (filter == null)
+                return alerts;
+
+            var result = new List<AlertDto>(alerts.Count);
+            foreach (var a in alerts)
+            {
+                if (a.BaseManagedEntityId.HasValue && filter.Contains(a.BaseManagedEntityId.Value))
+                    result.Add(a);
+            }
+            return result;
         }
 
         private void PushToAlloy(List<AlertDto> alerts)
@@ -238,6 +217,60 @@ WHERE @IncludeClosed = 1 OR a.ResolutionState <> 255;
                 success, failed, sw.ElapsedMilliseconds);
         }
 
+        private static AlertDto ReadRow(SqlDataReader r)
+        {
+            int severity = r.IsDBNull(3) ? 0 : Convert.ToInt32(r.GetValue(3));
+            int resState = r.IsDBNull(5) ? 0 : Convert.ToInt32(r.GetValue(5));
+
+            return new AlertDto
+            {
+                AlertId = r.GetGuid(0),
+                AlertName = GetStringOrEmpty(r, 1),
+                AlertDescription = GetStringOrEmpty(r, 2),
+                Severity = severity,
+                SeverityText = severity switch
+                {
+                    0 => "Information",
+                    1 => "Warning",
+                    2 => "Critical",
+                    _ => "Unknown"
+                },
+                Priority = r.IsDBNull(4) ? 0 : Convert.ToInt32(r.GetValue(4)),
+                ResolutionState = resState,
+                ResolutionStateText = resState switch
+                {
+                    0 => "New",
+                    255 => "Closed",
+                    _ => $"Custom_{resState}"
+                },
+                Category = GetStringOrEmpty(r, 6),
+                TimeRaised = r.IsDBNull(7) ? DateTime.MinValue : r.GetDateTime(7),
+                TimeAdded = r.IsDBNull(8) ? DateTime.MinValue : r.GetDateTime(8),
+                LastModified = r.IsDBNull(9) ? DateTime.MinValue : r.GetDateTime(9),
+                TimeResolved = r.IsDBNull(10) ? null : r.GetDateTime(10),
+                RepeatCount = r.IsDBNull(11) ? 0 : Convert.ToInt32(r.GetValue(11)),
+                Owner = GetStringOrEmpty(r, 12),
+                ResolvedBy = GetStringOrEmpty(r, 13),
+                TicketId = GetStringOrEmpty(r, 14),
+                Context = GetStringOrEmpty(r, 15),
+                CustomField1 = GetStringOrEmpty(r, 16),
+                CustomField2 = GetStringOrEmpty(r, 17),
+                CustomField3 = GetStringOrEmpty(r, 18),
+                CustomField4 = GetStringOrEmpty(r, 19),
+                CustomField5 = GetStringOrEmpty(r, 20),
+                CustomField6 = GetStringOrEmpty(r, 21),
+                CustomField7 = GetStringOrEmpty(r, 22),
+                CustomField8 = GetStringOrEmpty(r, 23),
+                CustomField9 = GetStringOrEmpty(r, 24),
+                CustomField10 = GetStringOrEmpty(r, 25),
+                IsMonitorAlert = !r.IsDBNull(26) && r.GetBoolean(26),
+                ConnectorId = r.IsDBNull(27) ? null : r.GetGuid(27),
+                BaseManagedEntityId = r.IsDBNull(28) ? (Guid?)null : r.GetGuid(28),
+                EntityDisplayName = GetStringOrEmpty(r, 29),
+                EntityFullName = GetStringOrEmpty(r, 30)
+            };
+        }
+
         private static string SerializeAlert(AlertDto a)
         {
             var obj = new
@@ -270,6 +303,7 @@ WHERE @IncludeClosed = 1 OR a.ResolutionState <> 255;
                 custom_field_8 = a.CustomField8,
                 custom_field_9 = a.CustomField9,
                 custom_field_10 = a.CustomField10,
+                base_managed_entity_id = a.BaseManagedEntityId?.ToString(),
                 entity_display_name = a.EntityDisplayName,
                 entity_full_name = a.EntityFullName,
                 is_monitor_alert = a.IsMonitorAlert,
@@ -282,59 +316,6 @@ WHERE @IncludeClosed = 1 OR a.ResolutionState <> 255;
         private static string FormatDate(DateTime dt)
         {
             return dt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
-        }
-
-        private List<AlertDto> GetChangedAlerts(List<AlertDto> current)
-        {
-            var changed = new List<AlertDto>();
-            var currentIds = new HashSet<Guid>();
-
-            foreach (var alert in current)
-            {
-                currentIds.Add(alert.AlertId);
-
-                // Check if this alert is new or modified
-                if (!_lastSeen.TryGetValue(alert.AlertId, out var lastMod)
-                    || alert.LastModified > lastMod)
-                {
-                    changed.Add(alert);
-                    _lastSeen[alert.AlertId] = alert.LastModified;
-
-                    // Track when alert becomes closed
-                    if (alert.ResolutionState == 255 && !_closedAt.ContainsKey(alert.AlertId))
-                    {
-                        _closedAt[alert.AlertId] = DateTime.UtcNow;
-                    }
-                }
-            }
-
-            // Clean up closed alerts after retention period
-            CleanupClosedAlerts(currentIds);
-
-            return changed;
-        }
-
-        private void CleanupClosedAlerts(HashSet<Guid> currentIds)
-        {
-            var retentionCutoff = DateTime.UtcNow.AddMinutes(-_settings.ClosedAlertRetentionMinutes);
-            var toRemove = new List<Guid>();
-
-            foreach (var kvp in _closedAt)
-            {
-                // Remove from tracking if:
-                // 1. Retention period has passed, OR
-                // 2. Alert no longer exists in database
-                if (kvp.Value < retentionCutoff || !currentIds.Contains(kvp.Key))
-                {
-                    toRemove.Add(kvp.Key);
-                }
-            }
-
-            foreach (var id in toRemove)
-            {
-                _lastSeen.Remove(id);
-                _closedAt.Remove(id);
-            }
         }
 
         private static string GetStringOrEmpty(SqlDataReader r, int index)

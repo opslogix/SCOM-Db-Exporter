@@ -18,6 +18,7 @@ namespace ScomDbExporter.Modules
 
         private readonly string _connString;
         private readonly ModuleToggle _settings;
+        private readonly GroupMembershipResolver _resolver;
         private readonly ILogger<PerformanceExporter> _log;
 
         private DateTime _nextRunUtc = DateTime.MinValue;
@@ -41,13 +42,18 @@ namespace ScomDbExporter.Modules
                 LabelNames = new[] { "object", "counter", "entity", "instance" }
             });
 
-        public PerformanceExporter(string connString, ModuleToggle settings, ILogger<PerformanceExporter> log)
+        public PerformanceExporter(
+            string connString,
+            ModuleToggle settings,
+            GroupMembershipResolver resolver,
+            ILogger<PerformanceExporter> log)
         {
             if (string.IsNullOrWhiteSpace(connString))
                 throw new ArgumentException("Connection string is null or empty", nameof(connString));
 
             _connString = connString;
             _settings = settings ?? new ModuleToggle();
+            _resolver = resolver;
             _log = log;
         }
 
@@ -138,10 +144,19 @@ namespace ScomDbExporter.Modules
 
         private void PublishMetrics()
         {
+            var filter = _resolver?.GetAllowedBmes(_settings.Groups);
+            int skipped = 0;
+
             foreach (var s in _latest.Values)
             {
                 if (s?.Entity == null || s.Counter == null)
                     continue;
+
+                if (filter != null && !filter.Contains(s.Entity.BaseManagedEntityId))
+                {
+                    skipped++;
+                    continue;
+                }
 
                 if (s.Counter.LookupKey != null &&
                     _mappingIndex.TryGetValue(s.Counter.LookupKey, out var map) &&
@@ -173,6 +188,9 @@ namespace ScomDbExporter.Modules
                     .Set(s.Value);
                 }
             }
+
+            if (filter != null && skipped > 0)
+                _log.LogTrace("Group filter skipped {Skipped} samples", skipped);
         }
 
         private static string ExtractInstanceName(string fullName)

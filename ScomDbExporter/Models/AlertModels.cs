@@ -32,6 +32,7 @@ namespace ScomDbExporter.Models
         public string CustomField8 { get; set; }
         public string CustomField9 { get; set; }
         public string CustomField10 { get; set; }
+        public Guid? BaseManagedEntityId { get; set; }
         public string EntityDisplayName { get; set; }
         public string EntityFullName { get; set; }
         public bool IsMonitorAlert { get; set; }

@@ -15,6 +15,7 @@ namespace ScomDbExporter.Core
         private readonly ILogger<ExporterHost> _log;
         private readonly List<IExporterModule> _modules = new();
 
+        private GroupMembershipResolver _resolver;
         private MetricsHttpServer? _metrics;
         private StateHttpServer? _stateServer;
         private AlertHttpServer? _alertServer;
@@ -43,43 +44,60 @@ namespace ScomDbExporter.Core
                 _config.Http.Host,
                 _config.Http.Port);
 
+            _resolver = new GroupMembershipResolver(
+                _config.ConnectionString,
+                _config.GroupResolver,
+                CollectAllConfiguredGroups(),
+                _loggerFactory.CreateLogger<GroupMembershipResolver>());
+
+            _resolver.Init();
+
             var perf = new PerformanceExporter(
                 _config.ConnectionString,
                 _config.Modules.Metrics,
+                _resolver,
                 _loggerFactory.CreateLogger<PerformanceExporter>());
 
             if (perf.Enabled)
             {
                 _modules.Add(perf);
-                _log.LogInformation("PerformanceExporter enabled (PollSeconds={PollSeconds})",
-                    _config.Modules.Metrics.PollSeconds);
+                _log.LogInformation(
+                    "PerformanceExporter enabled (PollSeconds={PollSeconds}, Groups={Groups})",
+                    _config.Modules.Metrics.PollSeconds,
+                    FormatGroups(_config.Modules.Metrics.Groups));
             }
 
             var state = new StateExporter(
                 _config.ConnectionString,
                 _config.Modules.State,
+                _resolver,
                 _loggerFactory.CreateLogger<StateExporter>());
 
             if (state.Enabled)
             {
                 _modules.Add(state);
-                _log.LogInformation("StateExporter enabled (PollSeconds={PollSeconds})",
-                    _config.Modules.State.PollSeconds);
+                _log.LogInformation(
+                    "StateExporter enabled (PollSeconds={PollSeconds}, FullReconcileMin={FullReconcile}, Groups={Groups})",
+                    _config.Modules.State.PollSeconds,
+                    _config.Modules.State.FullReconcileMinutes,
+                    FormatGroups(_config.Modules.State.Groups));
             }
 
             var alert = new AlertExporter(
                 _config.ConnectionString,
                 _config.Modules.Alert,
+                _resolver,
                 _loggerFactory.CreateLogger<AlertExporter>());
 
             if (alert.Enabled)
             {
                 _modules.Add(alert);
                 _log.LogInformation(
-                    "AlertExporter enabled (PollSeconds={PollSeconds}, IncludeClosedAlerts={IncludeClosed}, AlloyEndpoint={AlloyEndpoint})",
+                    "AlertExporter enabled (PollSeconds={PollSeconds}, IncludeClosedAlerts={IncludeClosed}, AlloyEndpoint={AlloyEndpoint}, Groups={Groups})",
                     _config.Modules.Alert.PollSeconds,
                     _config.Modules.Alert.IncludeClosedAlerts,
-                    _config.Modules.Alert.AlloyEndpoint ?? "(none)");
+                    _config.Modules.Alert.AlloyEndpoint ?? "(none)",
+                    FormatGroups(_config.Modules.Alert.Groups));
             }
 
             foreach (var m in _modules)
@@ -135,6 +153,15 @@ namespace ScomDbExporter.Core
 
             while (_running)
             {
+                try
+                {
+                    _resolver?.Tick();
+                }
+                catch (Exception ex)
+                {
+                    _log.LogError(ex, "Group resolver tick failed");
+                }
+
                 foreach (var m in _modules)
                 {
                     try
@@ -154,6 +181,31 @@ namespace ScomDbExporter.Core
             }
 
             _log.LogDebug("Main loop stopped");
+        }
+
+        private IEnumerable<string> CollectAllConfiguredGroups()
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            AddNames(set, _config.Modules?.Metrics?.Groups);
+            AddNames(set, _config.Modules?.State?.Groups);
+            AddNames(set, _config.Modules?.Alert?.Groups);
+            return set;
+        }
+
+        private static void AddNames(HashSet<string> set, string[] names)
+        {
+            if (names == null) return;
+            foreach (var n in names)
+            {
+                if (!string.IsNullOrWhiteSpace(n))
+                    set.Add(n.Trim());
+            }
+        }
+
+        private static string FormatGroups(string[] groups)
+        {
+            if (groups == null || groups.Length == 0) return "(none)";
+            return "[" + string.Join(", ", groups) + "]";
         }
 
         public void Stop()

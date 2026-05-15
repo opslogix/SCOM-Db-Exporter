@@ -171,6 +171,7 @@
     <Compile Include="Models\Models.cs" />
     <Compile Include="Models\StateModels.cs" />
     <Compile Include="Modules\AlertExporter.cs" />
+    <Compile Include="Modules\GroupMembershipResolver.cs" />
     <Compile Include="Modules\IExporterModule.cs" />
     <Compile Include="Modules\PerformanceExporter.cs" />
     <Compile Include="Modules\StateExporter.cs" />
