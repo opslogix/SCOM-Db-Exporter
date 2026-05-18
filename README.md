@@ -36,21 +36,28 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
     "Host": "localhost",
     "Port": 9464
   },
+  "GroupResolver": {
+    "RefreshMinutes": 15,
+    "IncludeHostedChildren": true
+  },
   "Modules": {
     "Metrics": {
       "Enabled": true,
-      "PollSeconds": 30
+      "PollSeconds": 30,
+      "Groups": []
     },
     "State": {
       "Enabled": true,
-      "PollSeconds": 30
+      "PollSeconds": 30,
+      "FullReconcileMinutes": 10,
+      "Groups": []
     },
     "Alert": {
       "Enabled": true,
       "PollSeconds": 30,
       "IncludeClosedAlerts": false,
-      "ClosedAlertRetentionMinutes": 60,
-      "AlloyEndpoint": "http://localhost:9465/loki/api/v1/raw"
+      "AlloyEndpoint": "http://localhost:9465/loki/api/v1/raw",
+      "Groups": []
     }
   }
 }
@@ -64,19 +71,31 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
 | `Http.Host` | Host binding (use `localhost` for local only, or `+` for all interfaces) |
 | `Http.Port` | Port number for all HTTP endpoints (default: 9464) |
 
+### Group Resolver Settings
+
+The `GroupResolver` block controls how SCOM group memberships are resolved when one or more modules declare `Groups` (see [Filtering by SCOM Groups](#filtering-by-scom-groups)).
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `GroupResolver.RefreshMinutes` | `15` | How often to re-resolve group membership against the SCOM DB. This is the only periodic group-related query — keep it relatively rare. |
+| `GroupResolver.IncludeHostedChildren` | `true` | When `true`, automatically includes every entity whose `TopLevelHostEntity` is a group member. Lets a `Servers` group also match each server's CPU/disk/process child entities. |
+
 ### Module Settings
 
 | Module | Setting | Description |
 |--------|---------|-------------|
 | **Metrics** | `Enabled` | Enable/disable performance metrics collection |
 |  | `PollSeconds` | How often to query SCOM for new performance data |
+|  | `Groups` | Optional `string[]` of SCOM group display names to filter to. Omitted, `null`, or `[]` means **no filter** — every entity is exported (default). See [Filtering by SCOM Groups](#filtering-by-scom-groups). |
 | **State** | `Enabled` | Enable/disable entity health state collection |
-|  | `PollSeconds` | How often to query SCOM for state changes |
+|  | `PollSeconds` | How often to query SCOM for state changes (incremental on `LastModified`) |
+|  | `FullReconcileMinutes` | How often to run a full state query instead of an incremental one. The full query prunes entries that no longer exist in SCOM. Default `10`. |
+|  | `Groups` | Optional `string[]` of SCOM group display names to filter to. Omitted, `null`, or `[]` means **no filter** — every entity is exported (default). See [Filtering by SCOM Groups](#filtering-by-scom-groups). |
 | **Alert** | `Enabled` | Enable/disable alert collection |
-|  | `PollSeconds` | How often to query SCOM for alert changes |
+|  | `PollSeconds` | How often to query SCOM for alert changes (incremental on `LastModified`) |
 |  | `IncludeClosedAlerts` | Include closed alerts (ResolutionState=255) in queries |
-|  | `ClosedAlertRetentionMinutes` | How long to track closed alerts before removing from memory |
 |  | `AlloyEndpoint` | URL of Alloy's loki.source.api endpoint for pushing alerts |
+|  | `Groups` | Optional `string[]` of SCOM group display names to filter to. Omitted, `null`, or `[]` means **no filter** — every entity is exported (default). See [Filtering by SCOM Groups](#filtering-by-scom-groups). |
 
 ### Logging Settings
 
@@ -142,23 +161,57 @@ Open **Event Viewer** → **Windows Logs** → **Application**, then filter by s
 Get-EventLog -LogName Application -Source ScomDbExporter -Newest 50
 ```
 
+## Filtering by SCOM Groups
+
+Each module accepts an optional `Groups` array of SCOM group display names. When set, only entities that belong to those groups (and, by default, their hosted child entities) are exported.
+
+```json
+"State": {
+  "Enabled": true,
+  "PollSeconds": 30,
+  "Groups": [ "Production Servers", "SQL Servers" ]
+}
+```
+
+### When `Groups` is empty
+
+`Groups` is an **allowlist**, not a deny-by-default switch. The three states are:
+
+| `Groups` value | Behavior |
+|----------------|----------|
+| Omitted, `null`, or `[]` | **No filter** — every entity is exported (default behavior, identical to the exporter before this feature existed). |
+| `["Production Servers"]` | Only members of that group (plus hosted children if `IncludeHostedChildren` is `true`) are exported. |
+| `["NonExistentGroup"]` | The group resolves to zero entities → a warning is logged at startup, and the module exports **nothing**. |
+
+If every module's `Groups` is empty/omitted, the resolver does not run the SCOM resolution query at all and logs `Group resolver: no groups configured — filtering disabled` at startup.
+
+### How it works
+
+- A shared `GroupMembershipResolver` resolves the configured group display names to a set of `BaseManagedEntityId`s using SCOM's `BaseManagedEntity` and `Relationship` tables — no dependency on optional views.
+- Resolution runs once at startup and again every `GroupResolver.RefreshMinutes` — this is the only periodic group-related SQL query the exporter issues.
+- Each module's poll fetches data as usual and then filters in-memory against the cached BME set. Filtering does **not** add cost to the per-poll SCOM query.
+- If `GroupResolver.IncludeHostedChildren` is `true` (default), every entity whose `TopLevelHostEntity` is a group member is also included. This is what makes filtering by a `Servers` group naturally pick up that server's CPU, disk, OS, and process child entities — which is normally where the perf data and child-monitor state lives.
+- **Nested groups are not transitively expanded** — only direct members of the named groups (plus their hosted children) are included. If you have a parent group whose only members are other groups, list the child groups explicitly in `Groups`.
+
+If multiple modules reference different groups, they are resolved together — one DB round-trip per refresh, regardless of how many modules use grouping.
+
 ## Alert Endpoint Details
 
 The `/alerts` endpoint returns JSON data designed for ingestion into Loki via Grafana Alloy. It includes:
 
 - All standard alert fields (name, description, severity, priority, resolution state, etc.)
 - Custom fields 1-10
-- Entity information (display name, full name)
+- Entity information (`base_managed_entity_id`, display name, full name)
 - Timestamps (time raised, time added, last modified, time resolved)
 - Alert context XML
 
-### Deduplication
+### Incremental delivery
 
-The alert exporter includes built-in deduplication:
-- Only **new or modified** alerts are returned on each request
-- Alerts are tracked by their `LastModified` timestamp
-- Closed alerts are cleaned up after `ClosedAlertRetentionMinutes`
-- On service restart, all current alerts are emitted once
+The alert exporter only fetches and emits **changes**:
+- The SQL query is incremental on `LastModified` — at each tick only rows whose `LastModified` has advanced since the previous tick are fetched.
+- The first poll after startup loads all currently-open alerts as the bootstrap snapshot, then the exporter stays incremental until restart.
+- When an alert closes, its `LastModified` advances and it is emitted exactly once with `resolution_state = 255` (provided `IncludeClosedAlerts = true`; otherwise closures are suppressed).
+- The `/alerts` HTTP endpoint and the Alloy push share the same delta — both emit the latest poll's changed alerts.
 
 ## Grafana Alloy Configuration
 
