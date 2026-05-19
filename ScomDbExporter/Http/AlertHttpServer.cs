@@ -15,11 +15,11 @@ namespace ScomDbExporter.Http
         private readonly AlertExporter _alert;
         private readonly ILogger<AlertHttpServer> _log;
 
-        public AlertHttpServer(AlertExporter alert, int port, ILogger<AlertHttpServer> log)
+        public AlertHttpServer(AlertExporter alert, string host, int port, ILogger<AlertHttpServer> log)
         {
             _alert = alert;
             _log = log;
-            _listener.Prefixes.Add($"http://+:{port}/alerts/");
+            _listener.Prefixes.Add($"http://{host}:{port}/alerts/");
         }
 
         public void Start()

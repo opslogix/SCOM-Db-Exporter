@@ -118,22 +118,28 @@ namespace ScomDbExporter.Core
             {
                 _stateServer = new StateHttpServer(
                     state,
+                    _config.Http.Host,
                     _config.Http.Port,
                     _loggerFactory.CreateLogger<StateHttpServer>());
 
                 _stateServer.Start();
-                _log.LogInformation("State endpoint started on port {Port}/state", _config.Http.Port);
+                _log.LogInformation(
+                    "State endpoint started on {Host}:{Port}/state",
+                    _config.Http.Host, _config.Http.Port);
             }
 
             if (alert.Enabled)
             {
                 _alertServer = new AlertHttpServer(
                     alert,
+                    _config.Http.Host,
                     _config.Http.Port,
                     _loggerFactory.CreateLogger<AlertHttpServer>());
 
                 _alertServer.Start();
-                _log.LogInformation("Alert endpoint started on port {Port}/alerts", _config.Http.Port);
+                _log.LogInformation(
+                    "Alert endpoint started on {Host}:{Port}/alerts",
+                    _config.Http.Host, _config.Http.Port);
             }
 
             _running = true;

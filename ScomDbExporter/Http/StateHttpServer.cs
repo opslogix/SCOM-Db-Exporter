@@ -14,11 +14,11 @@ namespace ScomDbExporter.Http
         private readonly StateExporter _state;
         private readonly ILogger<StateHttpServer> _log;
 
-        public StateHttpServer(StateExporter state, int port, ILogger<StateHttpServer> log)
+        public StateHttpServer(StateExporter state, string host, int port, ILogger<StateHttpServer> log)
         {
             _state = state;
             _log = log;
-            _listener.Prefixes.Add($"http://+:{port}/state/");
+            _listener.Prefixes.Add($"http://{host}:{port}/state/");
         }
 
         public void Start()
