@@ -186,6 +186,9 @@
     <None Include="Mappings\Microsoft.Windows.Server.json">
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
     </None>
+    <None Include="Mappings\Microsoft.SQLServer.Windows.json">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </None>
     <None Include="packages.config" />
   </ItemGroup>
   <ItemGroup />

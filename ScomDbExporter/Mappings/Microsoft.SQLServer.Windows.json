@@ -1,0 +1,52 @@
+{
+  "Mappings": [
+    {
+      "ObjectName": "SQL DB Engine:*",
+      "CounterName": "DB Engine Disk Read Latency (ms)",
+      "MetricName": "mssql_disk_read_latency_ms",
+      "MetricType": "gauge",
+      "Labels": {
+        "instance": "{instance}",
+        "mount_point": "{object_suffix}"
+      },
+      "ValueMultiplier": 1.0,
+      "Notes": "Wildcard ObjectName: SCOM stores 'SQL DB Engine:<MountPoint>' per disk. {object_suffix} captures the mount point (e.g. C:\\, D:\\SQLData\\)."
+    },
+    {
+      "ObjectName": "SQL DB Engine:*",
+      "CounterName": "DB Engine Disk Write Latency (ms)",
+      "MetricName": "mssql_disk_write_latency_ms",
+      "MetricType": "gauge",
+      "Labels": {
+        "instance": "{instance}",
+        "mount_point": "{object_suffix}"
+      },
+      "ValueMultiplier": 1.0,
+      "Notes": "Wildcard ObjectName. Disabled by default in the MP; enable via Override."
+    },
+    {
+      "ObjectName": "SQL Database:*",
+      "CounterName": "DB Disk Read Latency (ms)",
+      "MetricName": "mssql_database_disk_read_latency_ms",
+      "MetricType": "gauge",
+      "Labels": {
+        "instance": "{instance}",
+        "mount_point": "{object_suffix}"
+      },
+      "ValueMultiplier": 1.0,
+      "Notes": "Wildcard ObjectName: 'SQL Database:<MountPoint>' per disk."
+    },
+    {
+      "ObjectName": "SQL Database:*",
+      "CounterName": "DB Disk Write Latency (ms)",
+      "MetricName": "mssql_database_disk_write_latency_ms",
+      "MetricType": "gauge",
+      "Labels": {
+        "instance": "{instance}",
+        "mount_point": "{object_suffix}"
+      },
+      "ValueMultiplier": 1.0,
+      "Notes": "Wildcard ObjectName. Disabled by default in the MP; enable via Override."
+    }
+  ]
+}
