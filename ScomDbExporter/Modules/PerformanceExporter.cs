@@ -32,6 +32,7 @@ namespace ScomDbExporter.Modules
         private readonly Dictionary<Guid, EntityInfo> _entities = new();
         private readonly Dictionary<int, PerfSample> _latest = new();
         private readonly Dictionary<string, MappingEntry> _mappingIndex = new(StringComparer.OrdinalIgnoreCase);
+        private readonly List<(string ObjPrefix, string CounterKey, MappingEntry Entry)> _wildcardEntries = new();
         private readonly Dictionary<string, MetricDefinition> _metricDefs = new(StringComparer.OrdinalIgnoreCase);
 
         private static readonly Gauge RawGauge = Metrics.CreateGauge(
@@ -64,8 +65,8 @@ namespace ScomDbExporter.Modules
             LoadEntities();
 
             _log.LogInformation(
-                "PerformanceExporter init complete: {MappingCount} mappings, {MetricDefs} metric defs, {CounterCount} counters, {EntityCount} entities",
-                _mappingIndex.Count, _metricDefs.Count, _counters.Count, _entities.Count);
+                "PerformanceExporter init complete: {MappingCount} exact mappings, {WildcardCount} wildcard mappings, {MetricDefs} metric defs, {CounterCount} counters, {EntityCount} entities",
+                _mappingIndex.Count, _wildcardEntries.Count, _metricDefs.Count, _counters.Count, _entities.Count);
         }
 
         public void Tick()
@@ -103,8 +104,23 @@ namespace ScomDbExporter.Modules
 
                 foreach (var m in config.Mappings)
                 {
-                    string key = MakeKey(m.ObjectName, m.CounterName);
-                    _mappingIndex[key] = m;
+                    // A mapping is a wildcard entry iff its ObjectName ends with '*'.
+                    // The trailing '*' is stripped to form a case-insensitive prefix
+                    // matched against the actual ObjectName at lookup time.
+                    if (!string.IsNullOrEmpty(m.ObjectName) &&
+                        m.ObjectName.EndsWith("*", StringComparison.Ordinal))
+                    {
+                        string prefix = m.ObjectName
+                            .Substring(0, m.ObjectName.Length - 1)
+                            .ToLowerInvariant();
+                        string counterKey = (m.CounterName ?? "").ToLowerInvariant();
+                        _wildcardEntries.Add((prefix, counterKey, m));
+                    }
+                    else
+                    {
+                        string key = MakeKey(m.ObjectName, m.CounterName);
+                        _mappingIndex[key] = m;
+                    }
 
                     if (m.Labels == null) continue;
 
@@ -118,6 +134,10 @@ namespace ScomDbExporter.Modules
                         set.Add(label);
                 }
             }
+
+            // Most specific (longest) prefix wins when several wildcard entries
+            // could match the same ObjectName/CounterName. See TryGetMapping.
+            _wildcardEntries.Sort((a, b) => b.ObjPrefix.Length.CompareTo(a.ObjPrefix.Length));
 
             foreach (var kv in metricLabelSets)
             {
@@ -137,6 +157,42 @@ namespace ScomDbExporter.Modules
 
         private static string MakeKey(string obj, string counter)
             => (obj ?? "").ToLowerInvariant() + "|" + (counter ?? "").ToLowerInvariant();
+
+        /// <summary>
+        /// Resolves a mapping for the given ObjectName/CounterName. Exact entries
+        /// always take precedence over wildcard entries. When the match is a
+        /// wildcard, <paramref name="matchedPrefix"/> holds the matched prefix so
+        /// the caller can derive the {object_suffix} token; it is null otherwise.
+        /// </summary>
+        private bool TryGetMapping(string objectName, string counterName, out MappingEntry entry, out string matchedPrefix)
+        {
+            // Exact match first (existing behaviour, unchanged).
+            string key = MakeKey(objectName, counterName);
+            if (_mappingIndex.TryGetValue(key, out entry))
+            {
+                matchedPrefix = null;
+                return true;
+            }
+
+            // Wildcard prefix match. _wildcardEntries is pre-sorted by descending
+            // prefix length, so the most specific (longest) prefix wins.
+            string counterLower = (counterName ?? "").ToLowerInvariant();
+            string obj = objectName ?? "";
+            foreach (var (prefix, counterKey, candidate) in _wildcardEntries)
+            {
+                if (counterLower == counterKey
+                    && obj.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    entry = candidate;
+                    matchedPrefix = prefix;
+                    return true;
+                }
+            }
+
+            entry = null;
+            matchedPrefix = null;
+            return false;
+        }
 
         // -------------------------------
         // METRIC EXPORT
@@ -158,12 +214,19 @@ namespace ScomDbExporter.Modules
                     continue;
                 }
 
-                if (s.Counter.LookupKey != null &&
-                    _mappingIndex.TryGetValue(s.Counter.LookupKey, out var map) &&
+                if (TryGetMapping(s.Counter.ObjectName, s.Counter.CounterName, out var map, out var matchedPrefix) &&
                     _metricDefs.TryGetValue(map.MetricName, out var def))
                 {
                     double value = s.Value * map.ValueMultiplier;
                     var labels = new string[def.LabelNames.Length];
+
+                    // For a wildcard match, {object_suffix} is the portion of the
+                    // actual ObjectName beyond the matched prefix (e.g. "D:\SQLData\").
+                    string objectSuffix =
+                        matchedPrefix != null && s.Counter.ObjectName != null &&
+                        s.Counter.ObjectName.Length >= matchedPrefix.Length
+                            ? s.Counter.ObjectName.Substring(matchedPrefix.Length)
+                            : "";
 
                     for (int i = 0; i < def.LabelNames.Length; i++)
                     {
@@ -172,6 +235,7 @@ namespace ScomDbExporter.Modules
                             map.Labels != null && map.Labels.TryGetValue(label, out var tpl)
                                 ? tpl == "{instance}" ? ExtractInstanceName(s.Entity.FullName)
                                 : tpl == "{entity}" ? s.Entity.DisplayName
+                                : tpl == "{object_suffix}" ? objectSuffix
                                 : tpl
                                 : "";
                     }

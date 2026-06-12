@@ -195,9 +195,60 @@ If every module's `Groups` is empty/omitted, the resolver does not run the SCOM 
 
 If multiple modules reference different groups, they are resolved together — one DB round-trip per refresh, regardless of how many modules use grouping.
 
+## Performance Metric Mappings
+
+The Performance module maps raw SCOM counters to named Prometheus metrics using the JSON files in the `Mappings` folder next to the executable. Each entry matches on `ObjectName` + `CounterName` and produces a metric named `MetricName` with the configured `Labels`. A counter with no matching entry is still exported, but as the generic `scom_raw_value` gauge.
+
+Label values may use these tokens, which are expanded per sample:
+
+| Token | Expands to |
+|-------|------------|
+| `{instance}` | The instance portion of the entity's `FullName` (text after the last `:`) |
+| `{entity}` | The entity's `DisplayName` |
+| `{object_suffix}` | The captured suffix of a **wildcard** `ObjectName` match (see below); empty for non-wildcard entries |
+
+### Wildcard ObjectName matching
+
+Some Management Pack rules build the `ObjectName` at runtime by appending a per-entity identifier (for example, a disk mount point). The SQL Server MP's disk-latency rules store names like `SQL DB Engine:C:\`, `SQL DB Engine:D:\SQLData\`, and so on — one distinct `ObjectName` per disk — which a fixed mapping entry cannot enumerate.
+
+An entry whose `ObjectName` ends with `*` is a **wildcard entry**. It matches when:
+
+- the actual `ObjectName` **starts with** the mapping's `ObjectName` minus the trailing `*` (case-insensitive prefix match), **and**
+- the actual `CounterName` **equals** the mapping's `CounterName` (still an exact match).
+
+The portion of the actual `ObjectName` beyond the matched prefix is exposed as the `{object_suffix}` token, so it can be promoted to a label and keep each sub-instance distinct:
+
+```json
+{
+  "ObjectName": "SQL DB Engine:*",
+  "CounterName": "DB Engine Disk Read Latency (ms)",
+  "MetricName": "mssql_disk_read_latency_ms",
+  "Labels": {
+    "instance":    "{instance}",
+    "mount_point": "{object_suffix}"
+  },
+  "ValueMultiplier": 1.0
+}
+```
+
+For `SQL DB Engine:D:\SQLData\`, `{object_suffix}` resolves to `D:\SQLData\`.
+
+**Precedence:**
+
+- An **exact** entry always wins over any wildcard entry for the same `ObjectName`/`CounterName`.
+- When more than one wildcard entry could match (overlapping prefixes for the same `CounterName`, e.g. `SQL DB Engine:*` and `SQL DB Engine:D:\*`), the entry with the **longest prefix wins** — the most specific match. This is independent of mapping-file load order.
+
+The bundled `Mappings/Microsoft.SQLServer.Windows.json` uses this for the SQL Server on Windows MP disk read/write latency rules. New mapping files must also be added to `ScomDbExporter.csproj` as a `<None>` item with `CopyToOutputDirectory=Always` so they are copied next to the executable.
+
 ## Alert Endpoint Details
 
-The `/alerts` endpoint returns JSON data designed for ingestion into Loki via Grafana Alloy. It includes:
+### Delivery model
+
+Unlike metrics and state — which are **pulled** by Prometheus scraping `/metrics` and `/state` — alerts are **pushed** into your Grafana Alloy / Prometheus pipeline. On every poll the exporter HTTP-POSTs each changed alert, as a JSON document, to the downstream endpoint configured in `Modules.Alert.AlloyEndpoint` (default `http://localhost:9465/loki/api/v1/raw`, a Grafana Alloy [`loki.source.api`](#alerts-json-to-loki) receiver that forwards to Loki). This push is the primary delivery path; if `AlloyEndpoint` is empty, no push occurs.
+
+The `/alerts` HTTP endpoint is **for debugging/inspection only**. It serves the most recent poll's changed alerts as JSON on demand (pull) so you can eyeball what the exporter last emitted — it is not the delivery mechanism and nothing downstream needs to scrape it.
+
+Each pushed (and `/alerts`-served) alert includes:
 
 - All standard alert fields (name, description, severity, priority, resolution state, etc.)
 - Custom fields 1-10
@@ -211,7 +262,7 @@ The alert exporter only fetches and emits **changes**:
 - The SQL query is incremental on `LastModified` — at each tick only rows whose `LastModified` has advanced since the previous tick are fetched.
 - The first poll after startup loads all currently-open alerts as the bootstrap snapshot, then the exporter stays incremental until restart.
 - When an alert closes, its `LastModified` advances and it is emitted exactly once with `resolution_state = 255` (provided `IncludeClosedAlerts = true`; otherwise closures are suppressed).
-- The `/alerts` HTTP endpoint and the Alloy push share the same delta — both emit the latest poll's changed alerts.
+- The push and the `/alerts` debug endpoint share the same delta — both reflect the latest poll's changed alerts.
 
 ## Grafana Alloy Configuration
 
