@@ -33,7 +33,10 @@ namespace ScomDbExporter.Modules
         private readonly Dictionary<int, PerfSample> _latest = new();
         private readonly Dictionary<string, MappingEntry> _mappingIndex = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, MappingEntry> _instanceMappingIndex = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, MappingEntry> _classMappingIndex = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, MappingEntry> _classInstanceMappingIndex = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<(string ObjPrefix, string CounterKey, MappingEntry Entry)> _wildcardEntries = new();
+        private readonly List<(string TypeName, string ObjPrefix, string CounterKey, MappingEntry Entry)> _classWildcardEntries = new();
         private readonly Dictionary<string, MetricDefinition> _metricDefs = new(StringComparer.OrdinalIgnoreCase);
 
         private static readonly Gauge RawGauge = Metrics.CreateGauge(
@@ -41,7 +44,7 @@ namespace ScomDbExporter.Modules
             "Unmapped SCOM performance values",
             new GaugeConfiguration
             {
-                LabelNames = new[] { "object", "counter", "entity", "instance", "instance_name" }
+                LabelNames = new[] { "object", "counter", "entity", "instance", "instance_name", "entity_class" }
             });
 
         private static readonly Histogram SqlQueryDuration = Metrics.CreateHistogram(
@@ -75,8 +78,9 @@ namespace ScomDbExporter.Modules
             LoadEntities();
 
             _log.LogInformation(
-                "PerformanceExporter init complete: {MappingCount} exact mappings, {InstanceQualifiedCount} instance-qualified mappings, {WildcardCount} wildcard mappings, {MetricDefs} metric defs, {CounterCount} counters, {EntityCount} entities",
-                _mappingIndex.Count, _instanceMappingIndex.Count, _wildcardEntries.Count, _metricDefs.Count, _counters.Count, _entities.Count);
+                "PerformanceExporter init complete: {MappingCount} exact, {InstanceQualifiedCount} instance-qualified, {ClassCount} class-qualified, {ClassInstanceCount} class+instance-qualified, {WildcardCount} wildcard, {ClassWildcardCount} class-wildcard mappings, {MetricDefs} metric defs, {CounterCount} counters, {EntityCount} entities",
+                _mappingIndex.Count, _instanceMappingIndex.Count, _classMappingIndex.Count, _classInstanceMappingIndex.Count,
+                _wildcardEntries.Count, _classWildcardEntries.Count, _metricDefs.Count, _counters.Count, _entities.Count);
         }
 
         public void Tick()
@@ -114,18 +118,36 @@ namespace ScomDbExporter.Modules
 
                 foreach (var m in config.Mappings)
                 {
-                    // A mapping is a wildcard entry iff its ObjectName ends with '*'.
-                    // The trailing '*' is stripped to form a case-insensitive prefix
-                    // matched against the actual ObjectName at lookup time.
-                    if (!string.IsNullOrEmpty(m.InstanceName))
+                    bool hasClass    = !string.IsNullOrEmpty(m.EntityClass);
+                    bool hasInstance = !string.IsNullOrEmpty(m.InstanceName);
+                    bool isWildcard  = !string.IsNullOrEmpty(m.ObjectName) &&
+                                       m.ObjectName.EndsWith("*", StringComparison.Ordinal);
+
+                    if (hasClass && hasInstance)
                     {
-                        // Instance-qualified exact entry — highest lookup priority.
-                        // ObjectName wildcards are not supported for instance-qualified entries.
-                        string iKey = MakeInstanceKey(m.ObjectName, m.CounterName, m.InstanceName);
-                        _instanceMappingIndex[iKey] = m;
+                        // Class + instance qualified — most specific dimension combination.
+                        // ObjectName wildcards are not supported for this combination.
+                        _classInstanceMappingIndex[MakeClassInstanceKey(m.EntityClass, m.ObjectName, m.CounterName, m.InstanceName)] = m;
                     }
-                    else if (!string.IsNullOrEmpty(m.ObjectName) &&
-                        m.ObjectName.EndsWith("*", StringComparison.Ordinal))
+                    else if (hasClass && isWildcard)
+                    {
+                        string prefix = m.ObjectName
+                            .Substring(0, m.ObjectName.Length - 1)
+                            .ToLowerInvariant();
+                        string counterKey = (m.CounterName ?? "").ToLowerInvariant();
+                        _classWildcardEntries.Add((m.EntityClass.ToLowerInvariant(), prefix, counterKey, m));
+                    }
+                    else if (hasClass)
+                    {
+                        _classMappingIndex[MakeClassKey(m.EntityClass, m.ObjectName, m.CounterName)] = m;
+                    }
+                    else if (hasInstance)
+                    {
+                        // Instance-qualified exact entry (unqualified class).
+                        // ObjectName wildcards are not supported for instance-qualified entries.
+                        _instanceMappingIndex[MakeInstanceKey(m.ObjectName, m.CounterName, m.InstanceName)] = m;
+                    }
+                    else if (isWildcard)
                     {
                         string prefix = m.ObjectName
                             .Substring(0, m.ObjectName.Length - 1)
@@ -135,8 +157,7 @@ namespace ScomDbExporter.Modules
                     }
                     else
                     {
-                        string key = MakeKey(m.ObjectName, m.CounterName);
-                        _mappingIndex[key] = m;
+                        _mappingIndex[MakeKey(m.ObjectName, m.CounterName)] = m;
                     }
 
                     if (m.Labels == null) continue;
@@ -155,6 +176,7 @@ namespace ScomDbExporter.Modules
             // Most specific (longest) prefix wins when several wildcard entries
             // could match the same ObjectName/CounterName. See TryGetMapping.
             _wildcardEntries.Sort((a, b) => b.ObjPrefix.Length.CompareTo(a.ObjPrefix.Length));
+            _classWildcardEntries.Sort((a, b) => b.ObjPrefix.Length.CompareTo(a.ObjPrefix.Length));
 
             foreach (var kv in metricLabelSets)
             {
@@ -178,41 +200,84 @@ namespace ScomDbExporter.Modules
         private static string MakeInstanceKey(string obj, string counter, string instanceName)
             => (obj ?? "").ToLowerInvariant() + "|" + (counter ?? "").ToLowerInvariant() + "|" + (instanceName ?? "").ToLowerInvariant();
 
+        private static string MakeClassKey(string typeName, string obj, string counter)
+            => (typeName ?? "").ToLowerInvariant() + "|" + (obj ?? "").ToLowerInvariant() + "|" + (counter ?? "").ToLowerInvariant();
+
+        private static string MakeClassInstanceKey(string typeName, string obj, string counter, string instanceName)
+            => (typeName ?? "").ToLowerInvariant() + "|" + (obj ?? "").ToLowerInvariant() + "|" + (counter ?? "").ToLowerInvariant() + "|" + (instanceName ?? "").ToLowerInvariant();
+
         /// <summary>
-        /// Resolves a mapping for the given ObjectName/CounterName/InstanceName.
+        /// Resolves a mapping for the given ObjectName/CounterName/InstanceName/TypeName.
         /// Lookup precedence (most specific first):
-        ///   1. Instance-qualified exact  (ObjectName + CounterName + InstanceName)
-        ///   2. Unqualified exact         (ObjectName + CounterName)
-        ///   3. Unqualified wildcard      (ObjectName prefix + CounterName)
+        ///   1. Class + instance qualified exact  (TypeName + ObjectName + CounterName + InstanceName)
+        ///   2. Unqualified instance qualified     (ObjectName + CounterName + InstanceName)
+        ///   3. Class qualified exact              (TypeName + ObjectName + CounterName)
+        ///   4. Unqualified exact                  (ObjectName + CounterName)
+        ///   5. Class qualified wildcard           (TypeName + ObjectName prefix + CounterName)
+        ///   6. Unqualified wildcard               (ObjectName prefix + CounterName)
         /// When the match is a wildcard, <paramref name="matchedPrefix"/> holds the
         /// matched prefix so the caller can derive the {object_suffix} token; it is
         /// null for exact matches.
         /// </summary>
-        private bool TryGetMapping(string objectName, string counterName, string instanceName, out MappingEntry entry, out string matchedPrefix)
+        private bool TryGetMapping(string objectName, string counterName, string instanceName, string typeName, out MappingEntry entry, out string matchedPrefix)
         {
-            // 1. Instance-qualified exact match.
-            if (!string.IsNullOrEmpty(instanceName))
+            // 1. Class + instance qualified exact.
+            if (!string.IsNullOrEmpty(typeName) && !string.IsNullOrEmpty(instanceName))
             {
-                string iKey = MakeInstanceKey(objectName, counterName, instanceName);
-                if (_instanceMappingIndex.TryGetValue(iKey, out entry))
+                if (_classInstanceMappingIndex.TryGetValue(MakeClassInstanceKey(typeName, objectName, counterName, instanceName), out entry))
                 {
                     matchedPrefix = null;
                     return true;
                 }
             }
 
-            // 2. Unqualified exact match.
-            string key = MakeKey(objectName, counterName);
-            if (_mappingIndex.TryGetValue(key, out entry))
+            // 2. Unqualified instance qualified exact.
+            if (!string.IsNullOrEmpty(instanceName))
+            {
+                if (_instanceMappingIndex.TryGetValue(MakeInstanceKey(objectName, counterName, instanceName), out entry))
+                {
+                    matchedPrefix = null;
+                    return true;
+                }
+            }
+
+            // 3. Class qualified exact.
+            if (!string.IsNullOrEmpty(typeName))
+            {
+                if (_classMappingIndex.TryGetValue(MakeClassKey(typeName, objectName, counterName), out entry))
+                {
+                    matchedPrefix = null;
+                    return true;
+                }
+            }
+
+            // 4. Unqualified exact.
+            if (_mappingIndex.TryGetValue(MakeKey(objectName, counterName), out entry))
             {
                 matchedPrefix = null;
                 return true;
             }
 
-            // 3. Unqualified wildcard prefix match. _wildcardEntries is pre-sorted
-            // by descending prefix length so the most specific prefix wins.
             string counterLower = (counterName ?? "").ToLowerInvariant();
             string obj = objectName ?? "";
+
+            // 5. Class qualified wildcard. Pre-sorted by descending prefix length.
+            if (!string.IsNullOrEmpty(typeName))
+            {
+                string typeNameLower = typeName.ToLowerInvariant();
+                foreach (var (tn, prefix, counterKey, candidate) in _classWildcardEntries)
+                {
+                    if (tn == typeNameLower && counterLower == counterKey
+                        && obj.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    {
+                        entry = candidate;
+                        matchedPrefix = prefix;
+                        return true;
+                    }
+                }
+            }
+
+            // 6. Unqualified wildcard. Pre-sorted by descending prefix length.
             foreach (var (prefix, counterKey, candidate) in _wildcardEntries)
             {
                 if (counterLower == counterKey
@@ -249,7 +314,7 @@ namespace ScomDbExporter.Modules
                     continue;
                 }
 
-                if (TryGetMapping(s.Counter.ObjectName, s.Counter.CounterName, s.InstanceName, out var map, out var matchedPrefix) &&
+                if (TryGetMapping(s.Counter.ObjectName, s.Counter.CounterName, s.InstanceName, s.Entity?.TypeName, out var map, out var matchedPrefix) &&
                     _metricDefs.TryGetValue(map.MetricName, out var def))
                 {
                     double value = s.Value * map.ValueMultiplier;
@@ -272,6 +337,7 @@ namespace ScomDbExporter.Modules
                                 : tpl == "{entity}" ? s.Entity.DisplayName
                                 : tpl == "{object_suffix}" ? objectSuffix
                                 : tpl == "{instance_name}" ? s.InstanceName ?? ""
+                                : tpl == "{entity_class}" ? s.Entity?.TypeName ?? ""
                                 : tpl
                                 : "";
                     }
@@ -285,7 +351,8 @@ namespace ScomDbExporter.Modules
                         s.Counter.CounterName ?? "",
                         s.Entity.DisplayName ?? "",
                         ExtractInstanceName(s.Entity.FullName) ?? "",
-                        s.InstanceName ?? "")
+                        s.InstanceName ?? "",
+                        s.Entity?.TypeName ?? "")
                     .Set(s.Value);
                 }
             }
@@ -425,9 +492,10 @@ WHERE p.TimeSampled > @LastSync
         private void LoadEntities()
         {
             const string sql = @"
-SELECT BaseManagedEntityId, DisplayName, Path, FullName
-FROM dbo.BaseManagedEntity
-WHERE IsDeleted = 0";
+SELECT bme.BaseManagedEntityId, bme.DisplayName, bme.Path, bme.FullName, mt.TypeName
+FROM dbo.BaseManagedEntity bme
+JOIN dbo.ManagedType mt ON bme.BaseManagedTypeId = mt.ManagedTypeId
+WHERE bme.IsDeleted = 0";
 
             var sw = Stopwatch.StartNew();
 
@@ -443,7 +511,8 @@ WHERE IsDeleted = 0";
                     BaseManagedEntityId = r.GetGuid(0),
                     DisplayName = r.IsDBNull(1) ? "" : r.GetString(1),
                     Path = r.IsDBNull(2) ? "" : r.GetString(2),
-                    FullName = r.IsDBNull(3) ? "" : r.GetString(3)
+                    FullName = r.IsDBNull(3) ? "" : r.GetString(3),
+                    TypeName = r.IsDBNull(4) ? "" : r.GetString(4)
                 };
             }
 
@@ -507,9 +576,10 @@ WHERE PerformanceCounterId = @id";
         private EntityInfo LoadEntityOnDemand(Guid id)
         {
             const string sql = @"
-SELECT BaseManagedEntityId, DisplayName, Path, FullName
-FROM dbo.BaseManagedEntity
-WHERE BaseManagedEntityId = @id AND IsDeleted = 0";
+SELECT bme.BaseManagedEntityId, bme.DisplayName, bme.Path, bme.FullName, mt.TypeName
+FROM dbo.BaseManagedEntity bme
+JOIN dbo.ManagedType mt ON bme.BaseManagedTypeId = mt.ManagedTypeId
+WHERE bme.BaseManagedEntityId = @id AND bme.IsDeleted = 0";
 
             var sw = Stopwatch.StartNew();
 
@@ -527,7 +597,8 @@ WHERE BaseManagedEntityId = @id AND IsDeleted = 0";
                     BaseManagedEntityId = id,
                     DisplayName = r.IsDBNull(1) ? "" : r.GetString(1),
                     Path = r.IsDBNull(2) ? "" : r.GetString(2),
-                    FullName = r.IsDBNull(3) ? "" : r.GetString(3)
+                    FullName = r.IsDBNull(3) ? "" : r.GetString(3),
+                    TypeName = r.IsDBNull(4) ? "" : r.GetString(4)
                 };
             }
             else
