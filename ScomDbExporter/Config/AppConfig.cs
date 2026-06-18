@@ -26,6 +26,10 @@ namespace ScomDbExporter.Config
         public bool Enabled { get; set; } = true;
         public int PollSeconds { get; set; } = 5;
 
+        // How often to reload entity, counter and perf-source caches from the DB.
+        // Picks up newly discovered objects and removes deleted ones without a restart.
+        public int MetadataRefreshMinutes { get; set; } = 30;
+
         // SCOM group display names. Null/empty = no filter.
         public string[] Groups { get; set; }
     }

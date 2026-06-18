@@ -14,4 +14,5 @@ namespace ScomDbExporter.Models
     public class MappingFile { public List<MappingEntry> Mappings { get; set; } }
     public class MappingEntry { public string ObjectName; public string CounterName; public string InstanceName; public string EntityClass; public string MetricName; public Dictionary<string, string> Labels; public double ValueMultiplier; }
     public class MetricDefinition { public string MetricName; public string[] LabelNames; public Gauge Gauge; }
+    public struct PerfSourceInfo { public Guid EntityId; public Guid CounterId; public string InstanceName; }
 }

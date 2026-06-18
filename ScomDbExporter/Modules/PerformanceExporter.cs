@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
 using System.Diagnostics;
@@ -22,15 +22,23 @@ namespace ScomDbExporter.Modules
         private readonly ILogger<PerformanceExporter> _log;
 
         private DateTime _nextRunUtc = DateTime.MinValue;
+        private DateTime _nextMetadataRefreshUtc = DateTime.MaxValue;
         private DateTime _lastSyncTime = DateTime.UtcNow.AddMinutes(-5);
 
         // -------------------------------
         // INSTANCE STATE (NO STATICS)
         // -------------------------------
 
+        // Metadata caches — reloaded periodically via RefreshMetadata()
+        private readonly Dictionary<Guid, string> _managedTypes = new();
         private readonly Dictionary<Guid, CounterInfo> _counters = new();
         private readonly Dictionary<Guid, EntityInfo> _entities = new();
+        private readonly Dictionary<int, PerfSourceInfo> _perfSources = new();
+
+        // Latest sample per PerformanceSourceInternalId
         private readonly Dictionary<int, PerfSample> _latest = new();
+
+        // Mapping indexes — loaded once at startup, never refreshed
         private readonly Dictionary<string, MappingEntry> _mappingIndex = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, MappingEntry> _instanceMappingIndex = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, MappingEntry> _classMappingIndex = new(StringComparer.OrdinalIgnoreCase);
@@ -74,24 +82,64 @@ namespace ScomDbExporter.Modules
         public void Init()
         {
             LoadMappings();
+            LoadManagedTypes();
             LoadCounters();
             LoadEntities();
+            LoadPerfSources();
+
+            _nextMetadataRefreshUtc = DateTime.UtcNow.AddMinutes(Math.Max(1, _settings.MetadataRefreshMinutes));
 
             _log.LogInformation(
-                "PerformanceExporter init complete: {MappingCount} exact, {InstanceQualifiedCount} instance-qualified, {ClassCount} class-qualified, {ClassInstanceCount} class+instance-qualified, {WildcardCount} wildcard, {ClassWildcardCount} class-wildcard mappings, {MetricDefs} metric defs, {CounterCount} counters, {EntityCount} entities",
-                _mappingIndex.Count, _instanceMappingIndex.Count, _classMappingIndex.Count, _classInstanceMappingIndex.Count,
-                _wildcardEntries.Count, _classWildcardEntries.Count, _metricDefs.Count, _counters.Count, _entities.Count);
+                "PerformanceExporter init complete: {MappingCount} exact, {InstanceCount} instance-qualified, " +
+                "{ClassCount} class-qualified, {ClassInstanceCount} class+instance-qualified, " +
+                "{WildcardCount} wildcard, {ClassWildcardCount} class-wildcard mappings, {MetricDefs} metric defs, " +
+                "{TypeCount} managed types, {CounterCount} counters, {EntityCount} entities, {SourceCount} perf sources",
+                _mappingIndex.Count, _instanceMappingIndex.Count,
+                _classMappingIndex.Count, _classInstanceMappingIndex.Count,
+                _wildcardEntries.Count, _classWildcardEntries.Count, _metricDefs.Count,
+                _managedTypes.Count, _counters.Count, _entities.Count, _perfSources.Count);
         }
 
         public void Tick()
         {
-            if (DateTime.UtcNow < _nextRunUtc)
-                return;
+            var now = DateTime.UtcNow;
 
-            _nextRunUtc = DateTime.UtcNow.AddSeconds(Math.Max(1, _settings.PollSeconds));
+            if (now >= _nextMetadataRefreshUtc)
+            {
+                RefreshMetadata();
+                _nextMetadataRefreshUtc = DateTime.UtcNow.AddMinutes(Math.Max(1, _settings.MetadataRefreshMinutes));
+            }
 
-            Poll();
-            PublishMetrics();
+            if (now >= _nextRunUtc)
+            {
+                _nextRunUtc = DateTime.UtcNow.AddSeconds(Math.Max(1, _settings.PollSeconds));
+                Poll();
+                PublishMetrics();
+            }
+        }
+
+        // -------------------------------
+        // METADATA REFRESH
+        // -------------------------------
+
+        private void RefreshMetadata()
+        {
+            _log.LogInformation("Refreshing metadata caches (managed types, counters, entities, perf sources)");
+            var sw = Stopwatch.StartNew();
+
+            _managedTypes.Clear();
+            _counters.Clear();
+            _entities.Clear();
+            _perfSources.Clear();
+
+            LoadManagedTypes();
+            LoadCounters();
+            LoadEntities();
+            LoadPerfSources();
+
+            _log.LogInformation(
+                "Metadata refresh complete in {ElapsedMs}ms: {TypeCount} types, {CounterCount} counters, {EntityCount} entities, {SourceCount} perf sources",
+                sw.ElapsedMilliseconds, _managedTypes.Count, _counters.Count, _entities.Count, _perfSources.Count);
         }
 
         // -------------------------------
@@ -373,65 +421,31 @@ namespace ScomDbExporter.Modules
             return fullName;
         }
 
-
         // -------------------------------
         // POLLING
         // -------------------------------
 
         private void Poll()
         {
+            // No JOIN: PerformanceSource is cached in _perfSources.
             const string sql = @"
-SELECT
-    p.PerformanceSourceInternalId,
-    p.SampleValue,
-    p.TimeSampled,
-    ps.BaseManagedEntityId,
-    ps.PerformanceCounterId,
-    ps.PerfmonInstanceName
-FROM dbo.PerformanceDataAllView p WITH (NOLOCK)
-JOIN dbo.PerformanceSource ps WITH (NOLOCK)
-    ON p.PerformanceSourceInternalId = ps.PerformanceSourceInternalId
-WHERE p.TimeSampled > @LastSync
-  AND p.SampleValue IS NOT NULL;";
+SELECT PerformanceSourceInternalId, SampleValue, TimeSampled
+FROM dbo.PerformanceDataAllView WITH (NOLOCK)
+WHERE TimeSampled > @LastSync
+  AND SampleValue IS NOT NULL;";
 
             var sw = Stopwatch.StartNew();
-            int rowCount = 0;
+            var rawRows = new List<(int SourceId, double Val, DateTime Ts)>();
 
             try
             {
                 using var conn = new SqlConnection(_connString);
                 using var cmd = new SqlCommand(sql, conn);
                 cmd.Parameters.AddWithValue("@LastSync", _lastSyncTime);
-
                 conn.Open();
                 using var r = cmd.ExecuteReader();
-
                 while (r.Read())
-                {
-                    rowCount++;
-                int sourceId = r.GetInt32(0);
-                double val = r.GetDouble(1);
-                DateTime ts = r.GetDateTime(2);
-
-                var entityId = r.GetGuid(3);
-                var counterId = r.GetGuid(4);
-                string instanceName = r.IsDBNull(5) ? "" : r.GetString(5);
-
-                if (!_latest.TryGetValue(sourceId, out var existing) || ts > existing.Timestamp)
-                {
-                    _latest[sourceId] = new PerfSample
-                    {
-                        Value = val,
-                        Timestamp = ts,
-                        InstanceName = instanceName,
-                        Entity = _entities.TryGetValue(entityId, out var e) ? e : LoadEntityOnDemand(entityId),
-                        Counter = _counters.TryGetValue(counterId, out var c) ? c : LoadCounterOnDemand(counterId)
-                    };
-                }
-
-                if (ts > _lastSyncTime)
-                    _lastSyncTime = ts;
-                }
+                    rawRows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
             }
             catch (SqlException ex)
             {
@@ -446,27 +460,74 @@ WHERE p.TimeSampled > @LastSync
             if (sw.Elapsed.TotalSeconds > 5.0)
                 _log.LogWarning(
                     "Slow SQL query: poll took {ElapsedSeconds:F1}s ({RowCount} rows)",
-                    sw.Elapsed.TotalSeconds, rowCount);
+                    sw.Elapsed.TotalSeconds, rawRows.Count);
 
             _log.LogDebug(
                 "Polled {RowCount} performance rows in {ElapsedMs}ms (lastSync={LastSync:O})",
-                rowCount, sw.ElapsedMilliseconds, _lastSyncTime);
+                rawRows.Count, sw.ElapsedMilliseconds, _lastSyncTime);
+
+            // DataReader is closed — all on-demand SQL is safe here.
+            foreach (var (sourceId, val, ts) in rawRows)
+            {
+                if (!_perfSources.TryGetValue(sourceId, out var src))
+                    src = LoadPerfSourceOnDemand(sourceId);
+
+                if (src.EntityId == Guid.Empty)
+                    continue;
+
+                if (!_latest.TryGetValue(sourceId, out var existing) || ts > existing.Timestamp)
+                {
+                    _latest[sourceId] = new PerfSample
+                    {
+                        Value = val,
+                        Timestamp = ts,
+                        InstanceName = src.InstanceName,
+                        Entity  = _entities.TryGetValue(src.EntityId,  out var e) ? e : LoadEntityOnDemand(src.EntityId),
+                        Counter = _counters.TryGetValue(src.CounterId, out var c) ? c : LoadCounterOnDemand(src.CounterId)
+                    };
+                }
+
+                if (ts > _lastSyncTime)
+                    _lastSyncTime = ts;
+            }
         }
 
         // -------------------------------
         // METADATA
         // -------------------------------
 
-        private void LoadCounters()
+        private void LoadManagedTypes()
         {
-            const string sql = "SELECT PerformanceCounterId, CounterName, ObjectName FROM dbo.PerformanceCounter";
-
+            const string sql = "SELECT ManagedTypeId, TypeName FROM dbo.ManagedType";
             var sw = Stopwatch.StartNew();
 
             using var conn = new SqlConnection(_connString);
             using var cmd = new SqlCommand(sql, conn);
             conn.Open();
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (!r.IsDBNull(0) && !r.IsDBNull(1))
+                    _managedTypes[r.GetGuid(0)] = r.GetString(1);
+            }
 
+            sw.Stop();
+            SqlQueryDuration.WithLabels("load_managed_types").Observe(sw.Elapsed.TotalSeconds);
+
+            if (sw.Elapsed.TotalSeconds > 10.0)
+                _log.LogWarning(
+                    "Slow SQL query: load_managed_types took {ElapsedSeconds:F1}s ({Count} rows)",
+                    sw.Elapsed.TotalSeconds, _managedTypes.Count);
+        }
+
+        private void LoadCounters()
+        {
+            const string sql = "SELECT PerformanceCounterId, CounterName, ObjectName FROM dbo.PerformanceCounter";
+            var sw = Stopwatch.StartNew();
+
+            using var conn = new SqlConnection(_connString);
+            using var cmd = new SqlCommand(sql, conn);
+            conn.Open();
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
@@ -474,7 +535,7 @@ WHERE p.TimeSampled > @LastSync
                 {
                     PerformanceCounterId = r.GetGuid(0),
                     CounterName = r.IsDBNull(1) ? "" : r.GetString(1),
-                    ObjectName = r.IsDBNull(2) ? "" : r.GetString(2)
+                    ObjectName  = r.IsDBNull(2) ? "" : r.GetString(2)
                 };
                 info.LookupKey = MakeKey(info.ObjectName, info.CounterName);
                 _counters[info.PerformanceCounterId] = info;
@@ -491,28 +552,31 @@ WHERE p.TimeSampled > @LastSync
 
         private void LoadEntities()
         {
+            // BaseManagedTypeId is used to look up TypeName from the _managedTypes cache,
+            // avoiding a JOIN on every load.
             const string sql = @"
-SELECT bme.BaseManagedEntityId, bme.DisplayName, bme.Path, bme.FullName, mt.TypeName
-FROM dbo.BaseManagedEntity bme
-JOIN dbo.ManagedType mt ON bme.BaseManagedTypeId = mt.ManagedTypeId
-WHERE bme.IsDeleted = 0";
+SELECT BaseManagedEntityId, DisplayName, Path, FullName, BaseManagedTypeId
+FROM dbo.BaseManagedEntity
+WHERE IsDeleted = 0";
 
             var sw = Stopwatch.StartNew();
 
             using var conn = new SqlConnection(_connString);
             using var cmd = new SqlCommand(sql, conn);
             conn.Open();
-
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
+                var typeId = r.IsDBNull(4) ? Guid.Empty : r.GetGuid(4);
+                _managedTypes.TryGetValue(typeId, out var typeName);
+
                 _entities[r.GetGuid(0)] = new EntityInfo
                 {
                     BaseManagedEntityId = r.GetGuid(0),
                     DisplayName = r.IsDBNull(1) ? "" : r.GetString(1),
-                    Path = r.IsDBNull(2) ? "" : r.GetString(2),
-                    FullName = r.IsDBNull(3) ? "" : r.GetString(3),
-                    TypeName = r.IsDBNull(4) ? "" : r.GetString(4)
+                    Path        = r.IsDBNull(2) ? "" : r.GetString(2),
+                    FullName    = r.IsDBNull(3) ? "" : r.GetString(3),
+                    TypeName    = typeName ?? ""
                 };
             }
 
@@ -523,6 +587,80 @@ WHERE bme.IsDeleted = 0";
                 _log.LogWarning(
                     "Slow SQL query: load_entities took {ElapsedSeconds:F1}s ({EntityCount} rows)",
                     sw.Elapsed.TotalSeconds, _entities.Count);
+        }
+
+        private void LoadPerfSources()
+        {
+            const string sql = @"
+SELECT PerformanceSourceInternalId, BaseManagedEntityId, PerformanceCounterId, PerfmonInstanceName
+FROM dbo.PerformanceSource WITH (NOLOCK)";
+
+            var sw = Stopwatch.StartNew();
+
+            using var conn = new SqlConnection(_connString);
+            using var cmd = new SqlCommand(sql, conn);
+            conn.Open();
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                _perfSources[r.GetInt32(0)] = new PerfSourceInfo
+                {
+                    EntityId     = r.GetGuid(1),
+                    CounterId    = r.GetGuid(2),
+                    InstanceName = r.IsDBNull(3) ? "" : r.GetString(3)
+                };
+            }
+
+            sw.Stop();
+            SqlQueryDuration.WithLabels("load_perf_sources").Observe(sw.Elapsed.TotalSeconds);
+
+            if (sw.Elapsed.TotalSeconds > 10.0)
+                _log.LogWarning(
+                    "Slow SQL query: load_perf_sources took {ElapsedSeconds:F1}s ({Count} rows)",
+                    sw.Elapsed.TotalSeconds, _perfSources.Count);
+        }
+
+        private PerfSourceInfo LoadPerfSourceOnDemand(int sourceId)
+        {
+            const string sql = @"
+SELECT PerformanceSourceInternalId, BaseManagedEntityId, PerformanceCounterId, PerfmonInstanceName
+FROM dbo.PerformanceSource
+WHERE PerformanceSourceInternalId = @id";
+
+            var sw = Stopwatch.StartNew();
+
+            using var conn = new SqlConnection(_connString);
+            using var cmd = new SqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("@id", sourceId);
+            conn.Open();
+            using var r = cmd.ExecuteReader();
+
+            PerfSourceInfo result;
+            if (r.Read())
+            {
+                result = new PerfSourceInfo
+                {
+                    EntityId     = r.GetGuid(1),
+                    CounterId    = r.GetGuid(2),
+                    InstanceName = r.IsDBNull(3) ? "" : r.GetString(3)
+                };
+            }
+            else
+            {
+                result = default;
+            }
+
+            _perfSources[sourceId] = result;
+
+            sw.Stop();
+            SqlQueryDuration.WithLabels("source_on_demand").Observe(sw.Elapsed.TotalSeconds);
+
+            if (sw.Elapsed.TotalSeconds > 1.0)
+                _log.LogWarning(
+                    "Slow SQL query: source_on_demand took {ElapsedSeconds:F1}s for id={SourceId}",
+                    sw.Elapsed.TotalSeconds, sourceId);
+
+            return result;
         }
 
         private CounterInfo LoadCounterOnDemand(Guid id)
@@ -538,8 +676,8 @@ WHERE PerformanceCounterId = @id";
             using var cmd = new SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@id", id);
             conn.Open();
-
             using var r = cmd.ExecuteReader();
+
             CounterInfo result;
             if (r.Read())
             {
@@ -547,7 +685,7 @@ WHERE PerformanceCounterId = @id";
                 {
                     PerformanceCounterId = id,
                     CounterName = r.IsDBNull(1) ? "" : r.GetString(1),
-                    ObjectName = r.IsDBNull(2) ? "" : r.GetString(2)
+                    ObjectName  = r.IsDBNull(2) ? "" : r.GetString(2)
                 };
                 info.LookupKey = MakeKey(info.ObjectName, info.CounterName);
                 result = _counters[id] = info;
@@ -558,7 +696,7 @@ WHERE PerformanceCounterId = @id";
                 {
                     PerformanceCounterId = id,
                     CounterName = $"Counter_{id}",
-                    ObjectName = "Unknown"
+                    ObjectName  = "Unknown"
                 };
             }
 
@@ -576,10 +714,9 @@ WHERE PerformanceCounterId = @id";
         private EntityInfo LoadEntityOnDemand(Guid id)
         {
             const string sql = @"
-SELECT bme.BaseManagedEntityId, bme.DisplayName, bme.Path, bme.FullName, mt.TypeName
-FROM dbo.BaseManagedEntity bme
-JOIN dbo.ManagedType mt ON bme.BaseManagedTypeId = mt.ManagedTypeId
-WHERE bme.BaseManagedEntityId = @id AND bme.IsDeleted = 0";
+SELECT BaseManagedEntityId, DisplayName, Path, FullName, BaseManagedTypeId
+FROM dbo.BaseManagedEntity
+WHERE BaseManagedEntityId = @id AND IsDeleted = 0";
 
             var sw = Stopwatch.StartNew();
 
@@ -587,18 +724,21 @@ WHERE bme.BaseManagedEntityId = @id AND bme.IsDeleted = 0";
             using var cmd = new SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@id", id);
             conn.Open();
-
             using var r = cmd.ExecuteReader();
+
             EntityInfo result;
             if (r.Read())
             {
+                var typeId = r.IsDBNull(4) ? Guid.Empty : r.GetGuid(4);
+                _managedTypes.TryGetValue(typeId, out var typeName);
+
                 result = _entities[id] = new EntityInfo
                 {
                     BaseManagedEntityId = id,
                     DisplayName = r.IsDBNull(1) ? "" : r.GetString(1),
-                    Path = r.IsDBNull(2) ? "" : r.GetString(2),
-                    FullName = r.IsDBNull(3) ? "" : r.GetString(3),
-                    TypeName = r.IsDBNull(4) ? "" : r.GetString(4)
+                    Path        = r.IsDBNull(2) ? "" : r.GetString(2),
+                    FullName    = r.IsDBNull(3) ? "" : r.GetString(3),
+                    TypeName    = typeName ?? ""
                 };
             }
             else
