@@ -43,6 +43,15 @@ namespace ScomDbExporter.Modules
                 LabelNames = new[] { "object", "counter", "entity", "instance" }
             });
 
+        private static readonly Histogram SqlQueryDuration = Metrics.CreateHistogram(
+            "scom_sql_query_duration_seconds",
+            "Duration of SQL queries against the SCOM OperationsManager database",
+            new HistogramConfiguration
+            {
+                LabelNames = new[] { "query" },
+                Buckets = new[] { 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0 }
+            });
+
         public PerformanceExporter(
             string connString,
             ModuleToggle settings,
@@ -334,6 +343,13 @@ WHERE p.TimeSampled > @LastSync
                 return;
             }
 
+            SqlQueryDuration.WithLabels("poll").Observe(sw.Elapsed.TotalSeconds);
+
+            if (sw.Elapsed.TotalSeconds > 5.0)
+                _log.LogWarning(
+                    "Slow SQL query: poll took {ElapsedSeconds:F1}s ({RowCount} rows)",
+                    sw.Elapsed.TotalSeconds, rowCount);
+
             _log.LogDebug(
                 "Polled {RowCount} performance rows in {ElapsedMs}ms (lastSync={LastSync:O})",
                 rowCount, sw.ElapsedMilliseconds, _lastSyncTime);
@@ -346,6 +362,8 @@ WHERE p.TimeSampled > @LastSync
         private void LoadCounters()
         {
             const string sql = "SELECT PerformanceCounterId, CounterName, ObjectName FROM dbo.PerformanceCounter";
+
+            var sw = Stopwatch.StartNew();
 
             using var conn = new SqlConnection(_connString);
             using var cmd = new SqlCommand(sql, conn);
@@ -363,6 +381,14 @@ WHERE p.TimeSampled > @LastSync
                 info.LookupKey = MakeKey(info.ObjectName, info.CounterName);
                 _counters[info.PerformanceCounterId] = info;
             }
+
+            sw.Stop();
+            SqlQueryDuration.WithLabels("load_counters").Observe(sw.Elapsed.TotalSeconds);
+
+            if (sw.Elapsed.TotalSeconds > 10.0)
+                _log.LogWarning(
+                    "Slow SQL query: load_counters took {ElapsedSeconds:F1}s ({CounterCount} rows)",
+                    sw.Elapsed.TotalSeconds, _counters.Count);
         }
 
         private void LoadEntities()
@@ -371,6 +397,8 @@ WHERE p.TimeSampled > @LastSync
 SELECT BaseManagedEntityId, DisplayName, Path, FullName
 FROM dbo.BaseManagedEntity
 WHERE IsDeleted = 0";
+
+            var sw = Stopwatch.StartNew();
 
             using var conn = new SqlConnection(_connString);
             using var cmd = new SqlCommand(sql, conn);
@@ -387,6 +415,14 @@ WHERE IsDeleted = 0";
                     FullName = r.IsDBNull(3) ? "" : r.GetString(3)
                 };
             }
+
+            sw.Stop();
+            SqlQueryDuration.WithLabels("load_entities").Observe(sw.Elapsed.TotalSeconds);
+
+            if (sw.Elapsed.TotalSeconds > 10.0)
+                _log.LogWarning(
+                    "Slow SQL query: load_entities took {ElapsedSeconds:F1}s ({EntityCount} rows)",
+                    sw.Elapsed.TotalSeconds, _entities.Count);
         }
 
         private CounterInfo LoadCounterOnDemand(Guid id)
@@ -396,12 +432,15 @@ SELECT PerformanceCounterId, CounterName, ObjectName
 FROM dbo.PerformanceCounter
 WHERE PerformanceCounterId = @id";
 
+            var sw = Stopwatch.StartNew();
+
             using var conn = new SqlConnection(_connString);
             using var cmd = new SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@id", id);
             conn.Open();
 
             using var r = cmd.ExecuteReader();
+            CounterInfo result;
             if (r.Read())
             {
                 var info = new CounterInfo
@@ -411,15 +450,27 @@ WHERE PerformanceCounterId = @id";
                     ObjectName = r.IsDBNull(2) ? "" : r.GetString(2)
                 };
                 info.LookupKey = MakeKey(info.ObjectName, info.CounterName);
-                return _counters[id] = info;
+                result = _counters[id] = info;
+            }
+            else
+            {
+                result = _counters[id] = new CounterInfo
+                {
+                    PerformanceCounterId = id,
+                    CounterName = $"Counter_{id}",
+                    ObjectName = "Unknown"
+                };
             }
 
-            return _counters[id] = new CounterInfo
-            {
-                PerformanceCounterId = id,
-                CounterName = $"Counter_{id}",
-                ObjectName = "Unknown"
-            };
+            sw.Stop();
+            SqlQueryDuration.WithLabels("counter_on_demand").Observe(sw.Elapsed.TotalSeconds);
+
+            if (sw.Elapsed.TotalSeconds > 1.0)
+                _log.LogWarning(
+                    "Slow SQL query: counter_on_demand took {ElapsedSeconds:F1}s for id={CounterId}",
+                    sw.Elapsed.TotalSeconds, id);
+
+            return result;
         }
 
         private EntityInfo LoadEntityOnDemand(Guid id)
@@ -429,15 +480,18 @@ SELECT BaseManagedEntityId, DisplayName, Path, FullName
 FROM dbo.BaseManagedEntity
 WHERE BaseManagedEntityId = @id AND IsDeleted = 0";
 
+            var sw = Stopwatch.StartNew();
+
             using var conn = new SqlConnection(_connString);
             using var cmd = new SqlCommand(sql, conn);
             cmd.Parameters.AddWithValue("@id", id);
             conn.Open();
 
             using var r = cmd.ExecuteReader();
+            EntityInfo result;
             if (r.Read())
             {
-                return _entities[id] = new EntityInfo
+                result = _entities[id] = new EntityInfo
                 {
                     BaseManagedEntityId = id,
                     DisplayName = r.IsDBNull(1) ? "" : r.GetString(1),
@@ -445,12 +499,24 @@ WHERE BaseManagedEntityId = @id AND IsDeleted = 0";
                     FullName = r.IsDBNull(3) ? "" : r.GetString(3)
                 };
             }
-
-            return _entities[id] = new EntityInfo
+            else
             {
-                BaseManagedEntityId = id,
-                DisplayName = $"Entity_{id}"
-            };
+                result = _entities[id] = new EntityInfo
+                {
+                    BaseManagedEntityId = id,
+                    DisplayName = $"Entity_{id}"
+                };
+            }
+
+            sw.Stop();
+            SqlQueryDuration.WithLabels("entity_on_demand").Observe(sw.Elapsed.TotalSeconds);
+
+            if (sw.Elapsed.TotalSeconds > 1.0)
+                _log.LogWarning(
+                    "Slow SQL query: entity_on_demand took {ElapsedSeconds:F1}s for id={EntityId}",
+                    sw.Elapsed.TotalSeconds, id);
+
+            return result;
         }
     }
 }
