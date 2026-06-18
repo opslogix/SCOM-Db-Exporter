@@ -320,7 +320,7 @@ SELECT
     p.TimeSampled,
     ps.BaseManagedEntityId,
     ps.PerformanceCounterId,
-    ps.InstanceName
+    ps.PerfmonInstanceName
 FROM dbo.PerformanceDataAllView p WITH (NOLOCK)
 JOIN dbo.PerformanceSource ps WITH (NOLOCK)
     ON p.PerformanceSourceInternalId = ps.PerformanceSourceInternalId
