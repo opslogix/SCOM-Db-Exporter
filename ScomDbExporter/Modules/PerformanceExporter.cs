@@ -32,6 +32,7 @@ namespace ScomDbExporter.Modules
         private readonly Dictionary<Guid, EntityInfo> _entities = new();
         private readonly Dictionary<int, PerfSample> _latest = new();
         private readonly Dictionary<string, MappingEntry> _mappingIndex = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, MappingEntry> _instanceMappingIndex = new(StringComparer.OrdinalIgnoreCase);
         private readonly List<(string ObjPrefix, string CounterKey, MappingEntry Entry)> _wildcardEntries = new();
         private readonly Dictionary<string, MetricDefinition> _metricDefs = new(StringComparer.OrdinalIgnoreCase);
 
@@ -40,7 +41,7 @@ namespace ScomDbExporter.Modules
             "Unmapped SCOM performance values",
             new GaugeConfiguration
             {
-                LabelNames = new[] { "object", "counter", "entity", "instance" }
+                LabelNames = new[] { "object", "counter", "entity", "instance", "instance_name" }
             });
 
         private static readonly Histogram SqlQueryDuration = Metrics.CreateHistogram(
@@ -74,8 +75,8 @@ namespace ScomDbExporter.Modules
             LoadEntities();
 
             _log.LogInformation(
-                "PerformanceExporter init complete: {MappingCount} exact mappings, {WildcardCount} wildcard mappings, {MetricDefs} metric defs, {CounterCount} counters, {EntityCount} entities",
-                _mappingIndex.Count, _wildcardEntries.Count, _metricDefs.Count, _counters.Count, _entities.Count);
+                "PerformanceExporter init complete: {MappingCount} exact mappings, {InstanceQualifiedCount} instance-qualified mappings, {WildcardCount} wildcard mappings, {MetricDefs} metric defs, {CounterCount} counters, {EntityCount} entities",
+                _mappingIndex.Count, _instanceMappingIndex.Count, _wildcardEntries.Count, _metricDefs.Count, _counters.Count, _entities.Count);
         }
 
         public void Tick()
@@ -116,7 +117,14 @@ namespace ScomDbExporter.Modules
                     // A mapping is a wildcard entry iff its ObjectName ends with '*'.
                     // The trailing '*' is stripped to form a case-insensitive prefix
                     // matched against the actual ObjectName at lookup time.
-                    if (!string.IsNullOrEmpty(m.ObjectName) &&
+                    if (!string.IsNullOrEmpty(m.InstanceName))
+                    {
+                        // Instance-qualified exact entry — highest lookup priority.
+                        // ObjectName wildcards are not supported for instance-qualified entries.
+                        string iKey = MakeInstanceKey(m.ObjectName, m.CounterName, m.InstanceName);
+                        _instanceMappingIndex[iKey] = m;
+                    }
+                    else if (!string.IsNullOrEmpty(m.ObjectName) &&
                         m.ObjectName.EndsWith("*", StringComparison.Ordinal))
                     {
                         string prefix = m.ObjectName
@@ -167,15 +175,33 @@ namespace ScomDbExporter.Modules
         private static string MakeKey(string obj, string counter)
             => (obj ?? "").ToLowerInvariant() + "|" + (counter ?? "").ToLowerInvariant();
 
+        private static string MakeInstanceKey(string obj, string counter, string instanceName)
+            => (obj ?? "").ToLowerInvariant() + "|" + (counter ?? "").ToLowerInvariant() + "|" + (instanceName ?? "").ToLowerInvariant();
+
         /// <summary>
-        /// Resolves a mapping for the given ObjectName/CounterName. Exact entries
-        /// always take precedence over wildcard entries. When the match is a
-        /// wildcard, <paramref name="matchedPrefix"/> holds the matched prefix so
-        /// the caller can derive the {object_suffix} token; it is null otherwise.
+        /// Resolves a mapping for the given ObjectName/CounterName/InstanceName.
+        /// Lookup precedence (most specific first):
+        ///   1. Instance-qualified exact  (ObjectName + CounterName + InstanceName)
+        ///   2. Unqualified exact         (ObjectName + CounterName)
+        ///   3. Unqualified wildcard      (ObjectName prefix + CounterName)
+        /// When the match is a wildcard, <paramref name="matchedPrefix"/> holds the
+        /// matched prefix so the caller can derive the {object_suffix} token; it is
+        /// null for exact matches.
         /// </summary>
-        private bool TryGetMapping(string objectName, string counterName, out MappingEntry entry, out string matchedPrefix)
+        private bool TryGetMapping(string objectName, string counterName, string instanceName, out MappingEntry entry, out string matchedPrefix)
         {
-            // Exact match first (existing behaviour, unchanged).
+            // 1. Instance-qualified exact match.
+            if (!string.IsNullOrEmpty(instanceName))
+            {
+                string iKey = MakeInstanceKey(objectName, counterName, instanceName);
+                if (_instanceMappingIndex.TryGetValue(iKey, out entry))
+                {
+                    matchedPrefix = null;
+                    return true;
+                }
+            }
+
+            // 2. Unqualified exact match.
             string key = MakeKey(objectName, counterName);
             if (_mappingIndex.TryGetValue(key, out entry))
             {
@@ -183,8 +209,8 @@ namespace ScomDbExporter.Modules
                 return true;
             }
 
-            // Wildcard prefix match. _wildcardEntries is pre-sorted by descending
-            // prefix length, so the most specific (longest) prefix wins.
+            // 3. Unqualified wildcard prefix match. _wildcardEntries is pre-sorted
+            // by descending prefix length so the most specific prefix wins.
             string counterLower = (counterName ?? "").ToLowerInvariant();
             string obj = objectName ?? "";
             foreach (var (prefix, counterKey, candidate) in _wildcardEntries)
@@ -223,7 +249,7 @@ namespace ScomDbExporter.Modules
                     continue;
                 }
 
-                if (TryGetMapping(s.Counter.ObjectName, s.Counter.CounterName, out var map, out var matchedPrefix) &&
+                if (TryGetMapping(s.Counter.ObjectName, s.Counter.CounterName, s.InstanceName, out var map, out var matchedPrefix) &&
                     _metricDefs.TryGetValue(map.MetricName, out var def))
                 {
                     double value = s.Value * map.ValueMultiplier;
@@ -245,6 +271,7 @@ namespace ScomDbExporter.Modules
                                 ? tpl == "{instance}" ? ExtractInstanceName(s.Entity.FullName)
                                 : tpl == "{entity}" ? s.Entity.DisplayName
                                 : tpl == "{object_suffix}" ? objectSuffix
+                                : tpl == "{instance_name}" ? s.InstanceName ?? ""
                                 : tpl
                                 : "";
                     }
@@ -257,7 +284,8 @@ namespace ScomDbExporter.Modules
                         s.Counter.ObjectName ?? "",
                         s.Counter.CounterName ?? "",
                         s.Entity.DisplayName ?? "",
-                        ExtractInstanceName(s.Entity.FullName) ?? "")
+                        ExtractInstanceName(s.Entity.FullName) ?? "",
+                        s.InstanceName ?? "")
                     .Set(s.Value);
                 }
             }
@@ -291,7 +319,8 @@ SELECT
     p.SampleValue,
     p.TimeSampled,
     ps.BaseManagedEntityId,
-    ps.PerformanceCounterId
+    ps.PerformanceCounterId,
+    ps.InstanceName
 FROM dbo.PerformanceDataAllView p WITH (NOLOCK)
 JOIN dbo.PerformanceSource ps WITH (NOLOCK)
     ON p.PerformanceSourceInternalId = ps.PerformanceSourceInternalId
@@ -319,6 +348,7 @@ WHERE p.TimeSampled > @LastSync
 
                 var entityId = r.GetGuid(3);
                 var counterId = r.GetGuid(4);
+                string instanceName = r.IsDBNull(5) ? "" : r.GetString(5);
 
                 if (!_latest.TryGetValue(sourceId, out var existing) || ts > existing.Timestamp)
                 {
@@ -326,6 +356,7 @@ WHERE p.TimeSampled > @LastSync
                     {
                         Value = val,
                         Timestamp = ts,
+                        InstanceName = instanceName,
                         Entity = _entities.TryGetValue(entityId, out var e) ? e : LoadEntityOnDemand(entityId),
                         Counter = _counters.TryGetValue(counterId, out var c) ? c : LoadCounterOnDemand(counterId)
                     };
