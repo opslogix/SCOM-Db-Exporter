@@ -86,6 +86,10 @@ The `GroupResolver` block controls how SCOM group memberships are resolved when 
 |--------|---------|-------------|
 | **Metrics** | `Enabled` | Enable/disable performance metrics collection |
 |  | `PollSeconds` | How often to query SCOM for new performance data |
+|  | `PollOverlapMinutes` | How far behind the newest sample seen each poll re-reads. Samples reach the SCOM DB seconds to minutes after their `TimeSampled`; without an overlap they would be skipped. Must exceed the largest sample-to-insert delay in your environment. Default `15`; `0` disables the overlap. See [Late-arriving performance samples](#late-arriving-performance-samples). |
+|  | `CatchUpSeconds` | Cadence of the overlapping catch-up query when no group filter narrows the query (see below). Default `60`. |
+|  | `SeedLookbackHours` | On startup, load the latest sample per performance source from this many hours back so rarely collected counters (hourly, daily) are exported immediately. Should be longer than your slowest collection interval and no longer than SCOM's performance data retention. Default `48`; `0` disables seeding. |
+|  | `MetadataRefreshMinutes` | How often entity, counter and performance-source caches are reloaded. Default `30`. |
 |  | `Groups` | Optional `string[]` of SCOM group display names to filter to. Omitted, `null`, or `[]` means **no filter** — every entity is exported (default). See [Filtering by SCOM Groups](#filtering-by-scom-groups). |
 | **State** | `Enabled` | Enable/disable entity health state collection |
 |  | `PollSeconds` | How often to query SCOM for state changes (incremental on `LastModified`) |
@@ -194,6 +198,18 @@ If every module's `Groups` is empty/omitted, the resolver does not run the SCOM 
 - **Nested groups are not transitively expanded** — only direct members of the named groups (plus their hosted children) are included. If you have a parent group whose only members are other groups, list the child groups explicitly in `Groups`.
 
 If multiple modules reference different groups, they are resolved together — one DB round-trip per refresh, regardless of how many modules use grouping.
+
+## Late-arriving performance samples
+
+A performance sample is stamped with the time the agent collected it (`TimeSampled`), but it only reaches the SCOM database after the agent batches it and a management server writes it — typically 30 seconds to a few minutes later, occasionally 10+ minutes. A poll that only asks for `TimeSampled` newer than the newest sample already seen silently skips every such row, and rarely collected counters (for example `% Free Space`) may then never be exported.
+
+The Performance module avoids this in three ways:
+
+- **Overlap.** Each poll re-reads `PollOverlapMinutes` behind the newest sample seen. Rows already seen are ignored, so re-reading is harmless.
+- **Group-scoped queries.** When the Metrics module has `Groups` configured, the overlapping query is restricted to the performance sources of the group's entities, so it runs on every poll at low cost. The source list is rebuilt when metadata or group membership refreshes; a source created after the last refresh is picked up at the next `MetadataRefreshMinutes` cycle. Without `Groups` (or if a group resolves to more than 2000 sources) the query covers the whole SCOM database, so the overlapping query runs only every `CatchUpSeconds` and ordinary polls read only new rows.
+- **Seeding.** On startup (and when sources are added by a refresh) the latest sample per source within `SeedLookbackHours` is loaded, so hourly or daily counters do not have to wait for their next sample after a restart.
+
+The `scom_perf_late_rows_total` counter shows how many samples were accepted that a plain "newer than the newest seen" poll would have skipped. Set the log level to `Debug` to see per-poll row counts, the overlap in use and the seed results.
 
 ## Performance Metric Mappings
 

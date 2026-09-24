@@ -25,6 +25,19 @@ namespace ScomDbExporter.Modules
         private DateTime _nextMetadataRefreshUtc = DateTime.MaxValue;
         private DateTime _lastSyncTime = DateTime.UtcNow.AddMinutes(-5);
 
+        // Above this many group-scoped sources the IN (...) list is not worth its
+        // parse cost; fall back to the unfiltered query with a sparser catch-up.
+        private const int MaxFilteredSources = 2000;
+
+        // Comma-separated PerformanceSourceInternalIds of the group-filtered sources,
+        // or null when the query is not source-scoped. Built from _perfSources, so
+        // it is rebuilt after every metadata or group-membership refresh.
+        private string _sourceFilterSql;
+        private int[] _sourceIds;
+        private DateTime _filterResolverStampUtc = DateTime.MinValue;
+        private DateTime _nextCatchUpUtc = DateTime.MinValue;
+        private bool _seededUnfiltered;
+
         // -------------------------------
         // INSTANCE STATE (NO STATICS)
         // -------------------------------
@@ -64,6 +77,10 @@ namespace ScomDbExporter.Modules
                 Buckets = new[] { 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0 }
             });
 
+        private static readonly Counter LateRows = Metrics.CreateCounter(
+            "scom_perf_late_rows_total",
+            "Samples accepted that were older than the newest sample already seen (skipped by a poll without overlap)");
+
         public PerformanceExporter(
             string connString,
             ModuleToggle settings,
@@ -87,6 +104,9 @@ namespace ScomDbExporter.Modules
             LoadEntities();
             LoadPerfSources();
 
+            RebuildSourceFilter();
+            SeedLatest();
+
             _nextMetadataRefreshUtc = DateTime.UtcNow.AddMinutes(Math.Max(1, _settings.MetadataRefreshMinutes));
 
             _log.LogInformation(
@@ -108,6 +128,12 @@ namespace ScomDbExporter.Modules
             {
                 RefreshMetadata();
                 _nextMetadataRefreshUtc = DateTime.UtcNow.AddMinutes(Math.Max(1, _settings.MetadataRefreshMinutes));
+            }
+            else if (_resolver != null && _resolver.LastRefreshUtc != _filterResolverStampUtc)
+            {
+                // Group membership changed hands; the source list follows it.
+                RebuildSourceFilter();
+                SeedLatest();
             }
 
             if (now >= _nextRunUtc)
@@ -136,6 +162,9 @@ namespace ScomDbExporter.Modules
             LoadCounters();
             LoadEntities();
             LoadPerfSources();
+
+            RebuildSourceFilter();
+            SeedLatest();
 
             _log.LogInformation(
                 "Metadata refresh complete in {ElapsedMs}ms: {TypeCount} types, {CounterCount} counters, {EntityCount} entities, {SourceCount} perf sources",
@@ -427,12 +456,33 @@ namespace ScomDbExporter.Modules
 
         private void Poll()
         {
-            // No JOIN: PerformanceSource is cached in _perfSources.
-            const string sql = @"
+            // TimeSampled is when the agent collected the sample; the row reaches the
+            // DB seconds to minutes later. A watermark on TimeSampled alone therefore
+            // skips late rows for good, so polls re-read PollOverlapMinutes behind it.
+            // Source-scoped queries are cheap enough to overlap on every poll. An
+            // unscoped one covers the whole SCOM DB, so it overlaps only at the
+            // catch-up cadence and otherwise reads just the rows newer than the watermark.
+            var now = DateTime.UtcNow;
+            string sourceFilter = _sourceFilterSql;
+            int overlapMinutes = Math.Max(0, _settings.PollOverlapMinutes);
+
+            bool overlap = overlapMinutes > 0 && (sourceFilter != null || now >= _nextCatchUpUtc);
+            if (overlap && sourceFilter == null)
+                _nextCatchUpUtc = now.AddSeconds(Math.Max(1, _settings.CatchUpSeconds));
+
+            DateTime watermark = _lastSyncTime;
+            DateTime since = overlap ? watermark.AddMinutes(-overlapMinutes) : watermark;
+
+            // No JOIN: PerformanceSource is cached in _perfSources. The IN list holds
+            // integers from that cache only.
+            string sql = @"
 SELECT PerformanceSourceInternalId, SampleValue, TimeSampled
 FROM dbo.PerformanceDataAllView WITH (NOLOCK)
 WHERE TimeSampled > @LastSync
-  AND SampleValue IS NOT NULL;";
+  AND SampleValue IS NOT NULL" +
+                (sourceFilter != null
+                    ? "\n  AND PerformanceSourceInternalId IN (" + sourceFilter + ")"
+                    : "") + ";";
 
             var sw = Stopwatch.StartNew();
             var rawRows = new List<(int SourceId, double Val, DateTime Ts)>();
@@ -441,7 +491,7 @@ WHERE TimeSampled > @LastSync
             {
                 using var conn = new SqlConnection(_connString);
                 using var cmd = new SqlCommand(sql, conn);
-                cmd.Parameters.AddWithValue("@LastSync", _lastSyncTime);
+                cmd.Parameters.AddWithValue("@LastSync", since);
                 conn.Open();
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
@@ -462,12 +512,28 @@ WHERE TimeSampled > @LastSync
                     "Slow SQL query: poll took {ElapsedSeconds:F1}s ({RowCount} rows)",
                     sw.Elapsed.TotalSeconds, rawRows.Count);
 
-            _log.LogDebug(
-                "Polled {RowCount} performance rows in {ElapsedMs}ms (lastSync={LastSync:O})",
-                rawRows.Count, sw.ElapsedMilliseconds, _lastSyncTime);
-
             // DataReader is closed — all on-demand SQL is safe here.
-            foreach (var (sourceId, val, ts) in rawRows)
+            int accepted = ApplyRows(rawRows, watermark, countLate: true);
+
+            _log.LogDebug(
+                "Polled {RowCount} performance rows, {Accepted} new, in {ElapsedMs}ms " +
+                "(since={Since:O}, overlap={Overlap}, sourceScoped={Scoped})",
+                rawRows.Count, accepted, sw.ElapsedMilliseconds, since, overlap, sourceFilter != null);
+        }
+
+        /// <summary>
+        /// Applies rows to the latest-sample cache and advances the watermark.
+        /// Rows older than the newest sample already seen are kept when they are newer
+        /// than what is cached for their source. <paramref name="watermark"/> is the
+        /// value before this batch; with <paramref name="countLate"/>, accepted rows at
+        /// or below it are counted in scom_perf_late_rows_total.
+        /// </summary>
+        private int ApplyRows(List<(int SourceId, double Val, DateTime Ts)> rows, DateTime watermark, bool countLate)
+        {
+            int accepted = 0;
+            int late = 0;
+
+            foreach (var (sourceId, val, ts) in rows)
             {
                 if (!_perfSources.TryGetValue(sourceId, out var src))
                     src = LoadPerfSourceOnDemand(sourceId);
@@ -485,11 +551,147 @@ WHERE TimeSampled > @LastSync
                         Entity  = _entities.TryGetValue(src.EntityId,  out var e) ? e : LoadEntityOnDemand(src.EntityId),
                         Counter = _counters.TryGetValue(src.CounterId, out var c) ? c : LoadCounterOnDemand(src.CounterId)
                     };
+
+                    accepted++;
+                    if (countLate && ts <= watermark)
+                        late++;
                 }
 
                 if (ts > _lastSyncTime)
                     _lastSyncTime = ts;
             }
+
+            if (late > 0)
+                LateRows.Inc(late);
+
+            return accepted;
+        }
+
+        // -------------------------------
+        // SOURCE SCOPE + SEEDING
+        // -------------------------------
+
+        /// <summary>
+        /// Rebuilds the list of performance sources that belong to the configured
+        /// groups. Leaves the query unscoped when no groups are configured, when the
+        /// list is empty, or when it is too long for an IN (...) clause.
+        /// </summary>
+        private void RebuildSourceFilter()
+        {
+            _filterResolverStampUtc = _resolver?.LastRefreshUtc ?? DateTime.MinValue;
+            _sourceFilterSql = null;
+            _sourceIds = null;
+
+            var allowed = _resolver?.GetAllowedBmes(_settings.Groups);
+            if (allowed == null)
+                return;
+
+            var ids = new List<int>();
+            foreach (var kv in _perfSources)
+            {
+                if (allowed.Contains(kv.Value.EntityId))
+                    ids.Add(kv.Key);
+            }
+
+            if (ids.Count == 0 || ids.Count > MaxFilteredSources)
+            {
+                _log.LogWarning(
+                    "Performance queries not scoped to group sources ({Count} sources, allowed 1-{Max}); querying the whole SCOM database",
+                    ids.Count, MaxFilteredSources);
+                return;
+            }
+
+            ids.Sort();
+            _sourceIds = ids.ToArray();
+            _sourceFilterSql = string.Join(",", _sourceIds);
+
+            _log.LogInformation(
+                "Performance queries scoped to {Count} performance sources of the configured groups",
+                _sourceIds.Length);
+        }
+
+        /// <summary>
+        /// Loads the latest sample per performance source from the last
+        /// SeedLookbackHours, so counters collected rarely (hourly, daily) are
+        /// exported right after start. Scoped to sources without a cached sample when
+        /// the query is source-scoped; the unscoped variant covers the whole DB and
+        /// runs once. Best-effort: a SQL failure only logs a warning.
+        /// </summary>
+        private void SeedLatest()
+        {
+            if (_settings.SeedLookbackHours <= 0)
+                return;
+
+            string idClause = "";
+            int wanted = 0;
+
+            if (_sourceIds != null)
+            {
+                var missing = new List<int>();
+                foreach (var id in _sourceIds)
+                {
+                    if (!_latest.ContainsKey(id))
+                        missing.Add(id);
+                }
+
+                if (missing.Count == 0)
+                    return;
+
+                wanted = missing.Count;
+                idClause = "\nWHERE ps.PerformanceSourceInternalId IN (" + string.Join(",", missing) + ")";
+            }
+            else
+            {
+                if (_seededUnfiltered)
+                    return;
+
+                _log.LogInformation("Seeding latest samples for all performance sources (no group scope); this can take a while");
+            }
+
+            string sql = @"
+SELECT ps.PerformanceSourceInternalId, x.SampleValue, x.TimeSampled
+FROM dbo.PerformanceSource ps WITH (NOLOCK)
+CROSS APPLY (
+    SELECT TOP (1) pd.SampleValue, pd.TimeSampled
+    FROM dbo.PerformanceDataAllView pd WITH (NOLOCK)
+    WHERE pd.PerformanceSourceInternalId = ps.PerformanceSourceInternalId
+      AND pd.TimeSampled > @Since
+      AND pd.SampleValue IS NOT NULL
+    ORDER BY pd.TimeSampled DESC
+) x" + idClause + ";";
+
+            var sw = Stopwatch.StartNew();
+            var rows = new List<(int SourceId, double Val, DateTime Ts)>();
+
+            try
+            {
+                using var conn = new SqlConnection(_connString);
+                using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
+                cmd.Parameters.AddWithValue("@Since", DateTime.UtcNow.AddHours(-_settings.SeedLookbackHours));
+                conn.Open();
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                    rows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
+            }
+            catch (SqlException ex)
+            {
+                _log.LogWarning(ex,
+                    "Seeding latest performance samples failed after {ElapsedMs}ms; continuing without it",
+                    sw.ElapsedMilliseconds);
+                return;
+            }
+
+            SqlQueryDuration.WithLabels("seed").Observe(sw.Elapsed.TotalSeconds);
+
+            // Apply after the reader is closed: on-demand loads open their own connections.
+            int accepted = ApplyRows(rows, _lastSyncTime, countLate: false);
+
+            if (_sourceIds == null)
+                _seededUnfiltered = true;
+
+            _log.LogInformation(
+                "Seeded {Accepted} performance sources from the last {Hours}h ({Rows} rows, {Wanted} wanted) in {ElapsedMs}ms",
+                accepted, _settings.SeedLookbackHours, rows.Count, wanted, sw.ElapsedMilliseconds);
         }
 
         // -------------------------------

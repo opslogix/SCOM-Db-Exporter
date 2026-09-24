@@ -30,6 +30,21 @@ namespace ScomDbExporter.Config
         // Picks up newly discovered objects and removes deleted ones without a restart.
         public int MetadataRefreshMinutes { get; set; } = 30;
 
+        // Metrics module: samples reach the DB seconds to minutes after TimeSampled.
+        // Each poll therefore re-reads this many minutes behind the newest sample
+        // seen, so late-arriving rows are not skipped. Must exceed the largest
+        // sample-to-insert delay in the environment. 0 = no overlap (legacy behaviour).
+        public int PollOverlapMinutes { get; set; } = 15;
+
+        // Metrics module: when no group filter narrows the query, the overlapping
+        // catch-up query runs at this cadence instead of on every poll.
+        public int CatchUpSeconds { get; set; } = 60;
+
+        // Metrics module: on startup, and when sources are added, load the latest
+        // sample per performance source from this many hours back so rarely
+        // collected counters are exported immediately. 0 = disabled.
+        public int SeedLookbackHours { get; set; } = 48;
+
         // SCOM group display names. Null/empty = no filter.
         public string[] Groups { get; set; }
     }
