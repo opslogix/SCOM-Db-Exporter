@@ -42,14 +42,28 @@ namespace ScomDbExporter.Modules
         // INSTANCE STATE (NO STATICS)
         // -------------------------------
 
-        // Metadata caches — reloaded periodically via RefreshMetadata()
-        private readonly Dictionary<Guid, string> _managedTypes = new();
-        private readonly Dictionary<Guid, CounterInfo> _counters = new();
-        private readonly Dictionary<Guid, EntityInfo> _entities = new();
-        private readonly Dictionary<int, PerfSourceInfo> _perfSources = new();
+        // Metadata caches — replaced as a whole by RefreshMetadata() once every
+        // query has succeeded, so a failed refresh leaves the previous caches intact.
+        private Dictionary<Guid, string> _managedTypes = new();
+        private Dictionary<Guid, CounterInfo> _counters = new();
+        private Dictionary<Guid, EntityInfo> _entities = new();
+        private Dictionary<int, PerfSourceInfo> _perfSources = new();
+
+        // A failed metadata refresh is retried after this delay instead of on every tick.
+        private static readonly TimeSpan MetadataRetryDelay = TimeSpan.FromMinutes(1);
 
         // Latest sample per PerformanceSourceInternalId
         private readonly Dictionary<int, PerfSample> _latest = new();
+
+        // Series currently exported per source, so they can be removed from the
+        // gauges when the source goes stale, is deleted or leaves the groups.
+        private readonly Dictionary<int, PublishedSeries> _published = new();
+
+        private sealed class PublishedSeries
+        {
+            public Gauge Gauge;
+            public string[] Labels;
+        }
 
         // Mapping indexes — loaded once at startup, never refreshed
         private readonly Dictionary<string, MappingEntry> _mappingIndex = new(StringComparer.OrdinalIgnoreCase);
@@ -99,10 +113,10 @@ namespace ScomDbExporter.Modules
         public void Init()
         {
             LoadMappings();
-            LoadManagedTypes();
-            LoadCounters();
-            LoadEntities();
-            LoadPerfSources();
+            LoadManagedTypes(_managedTypes);
+            LoadCounters(_counters);
+            LoadEntities(_entities, _managedTypes);
+            LoadPerfSources(_perfSources);
 
             RebuildSourceFilter();
             SeedLatest();
@@ -126,8 +140,10 @@ namespace ScomDbExporter.Modules
 
             if (now >= _nextMetadataRefreshUtc)
             {
-                RefreshMetadata();
-                _nextMetadataRefreshUtc = DateTime.UtcNow.AddMinutes(Math.Max(1, _settings.MetadataRefreshMinutes));
+                bool refreshed = RefreshMetadata();
+                _nextMetadataRefreshUtc = DateTime.UtcNow + (refreshed
+                    ? TimeSpan.FromMinutes(Math.Max(1, _settings.MetadataRefreshMinutes))
+                    : MetadataRetryDelay);
             }
             else if (_resolver != null && _resolver.LastRefreshUtc != _filterResolverStampUtc)
             {
@@ -148,20 +164,40 @@ namespace ScomDbExporter.Modules
         // METADATA REFRESH
         // -------------------------------
 
-        private void RefreshMetadata()
+        /// <summary>
+        /// Reloads the metadata caches into new dictionaries and swaps them in only
+        /// when every query has succeeded. On failure the previous caches stay in
+        /// use, polling continues, and false is returned so the caller retries soon.
+        /// </summary>
+        private bool RefreshMetadata()
         {
             _log.LogInformation("Refreshing metadata caches (managed types, counters, entities, perf sources)");
             var sw = Stopwatch.StartNew();
 
-            _managedTypes.Clear();
-            _counters.Clear();
-            _entities.Clear();
-            _perfSources.Clear();
+            var types = new Dictionary<Guid, string>();
+            var counters = new Dictionary<Guid, CounterInfo>();
+            var entities = new Dictionary<Guid, EntityInfo>();
+            var sources = new Dictionary<int, PerfSourceInfo>();
 
-            LoadManagedTypes();
-            LoadCounters();
-            LoadEntities();
-            LoadPerfSources();
+            try
+            {
+                LoadManagedTypes(types);
+                LoadCounters(counters);
+                LoadEntities(entities, types);
+                LoadPerfSources(sources);
+            }
+            catch (Exception ex)
+            {
+                _log.LogError(ex,
+                    "Metadata refresh failed after {ElapsedMs}ms; keeping the previous caches and retrying in {RetrySeconds}s",
+                    sw.ElapsedMilliseconds, (int)MetadataRetryDelay.TotalSeconds);
+                return false;
+            }
+
+            _managedTypes = types;
+            _counters = counters;
+            _entities = entities;
+            _perfSources = sources;
 
             RebuildSourceFilter();
             SeedLatest();
@@ -169,6 +205,8 @@ namespace ScomDbExporter.Modules
             _log.LogInformation(
                 "Metadata refresh complete in {ElapsedMs}ms: {TypeCount} types, {CounterCount} counters, {EntityCount} entities, {SourceCount} perf sources",
                 sw.ElapsedMilliseconds, _managedTypes.Count, _counters.Count, _entities.Count, _perfSources.Count);
+
+            return true;
         }
 
         // -------------------------------
@@ -378,24 +416,63 @@ namespace ScomDbExporter.Modules
         private void PublishMetrics()
         {
             var filter = _resolver?.GetAllowedBmes(_settings.Groups);
-            int skipped = 0;
+            var nowUtc = DateTime.UtcNow;
+            var maxAge = _settings.SeriesMaxAgeHours > 0
+                ? TimeSpan.FromHours(Math.Min(_settings.SeriesMaxAgeHours, 24 * 3650))
+                : TimeSpan.Zero;
 
-            foreach (var s in _latest.Values)
+            int skipped = 0;
+            int goneDeleted = 0, goneExpired = 0, goneFiltered = 0;
+            List<PublishedSeries> stale = null;
+            List<int> drop = null;
+
+            foreach (var kv in _latest)
             {
+                int sourceId = kv.Key;
+                var s = kv.Value;
+
                 if (s?.Entity == null || s.Counter == null)
                     continue;
 
-                if (filter != null && !filter.Contains(s.Entity.BaseManagedEntityId))
+                bool inGroups = filter == null || filter.Contains(s.Entity.BaseManagedEntityId);
+                bool isDeleted = !EntityExists(s.Entity.BaseManagedEntityId);
+                bool isExpired = maxAge > TimeSpan.Zero && nowUtc - s.Timestamp > maxAge;
+
+                if (!inGroups || isDeleted || isExpired)
                 {
-                    skipped++;
+                    if (!inGroups)
+                        skipped++;
+
+                    // Stop exporting whatever this source last published.
+                    if (_published.TryGetValue(sourceId, out var prev))
+                    {
+                        _published.Remove(sourceId);
+                        (stale ??= new List<PublishedSeries>()).Add(prev);
+
+                        if (isDeleted) goneDeleted++;
+                        else if (isExpired) goneExpired++;
+                        else goneFiltered++;
+                    }
+
+                    // A deleted or expired sample cannot come back on its own (a new
+                    // row creates a fresh one); one that merely left the groups stays
+                    // cached in case membership returns.
+                    if (isDeleted || isExpired)
+                        (drop ??= new List<int>()).Add(sourceId);
+
                     continue;
                 }
+
+                Gauge gauge;
+                string[] labels;
+                double value;
 
                 if (TryGetMapping(s.Counter.ObjectName, s.Counter.CounterName, s.InstanceName, s.Entity?.TypeName, out var map, out var matchedPrefix) &&
                     _metricDefs.TryGetValue(map.MetricName, out var def))
                 {
-                    double value = s.Value * map.ValueMultiplier;
-                    var labels = new string[def.LabelNames.Length];
+                    value = s.Value * map.ValueMultiplier;
+                    labels = new string[def.LabelNames.Length];
+                    gauge = def.Gauge;
 
                     // For a wildcard match, {object_suffix} is the portion of the
                     // actual ObjectName beyond the matched prefix (e.g. "D:\SQLData\").
@@ -418,24 +495,105 @@ namespace ScomDbExporter.Modules
                                 : tpl
                                 : "";
                     }
-
-                    def.Gauge.WithLabels(labels).Set(value);
                 }
                 else
                 {
-                    RawGauge.WithLabels(
+                    value = s.Value;
+                    gauge = RawGauge;
+                    labels = new[]
+                    {
                         s.Counter.ObjectName ?? "",
                         s.Counter.CounterName ?? "",
                         s.Entity.DisplayName ?? "",
                         ExtractInstanceName(s.Entity.FullName) ?? "",
                         s.InstanceName ?? "",
-                        s.Entity?.TypeName ?? "")
-                    .Set(s.Value);
+                        s.Entity?.TypeName ?? ""
+                    };
                 }
+
+                gauge.WithLabels(labels).Set(value);
+
+                // Remember what this source publishes; if its labels changed (for
+                // example a renamed entity), the previous series is removed below.
+                if (!_published.TryGetValue(sourceId, out var old))
+                {
+                    _published[sourceId] = new PublishedSeries { Gauge = gauge, Labels = labels };
+                }
+                else if (old.Gauge != gauge || !SameLabels(old.Labels, labels))
+                {
+                    (stale ??= new List<PublishedSeries>()).Add(old);
+                    _published[sourceId] = new PublishedSeries { Gauge = gauge, Labels = labels };
+                }
+            }
+
+            if (drop != null)
+            {
+                foreach (var id in drop)
+                    _latest.Remove(id);
+            }
+
+            if (stale != null)
+            {
+                int removed = SweepStaleSeries(stale);
+
+                if (removed > 0)
+                    _log.LogInformation(
+                        "Removed {Removed} stale series ({Deleted} deleted entities, {Expired} expired, {Filtered} left the configured groups)",
+                        removed, goneDeleted, goneExpired, goneFiltered);
             }
 
             if (filter != null && skipped > 0)
                 _log.LogTrace("Group filter skipped {Skipped} samples", skipped);
+        }
+
+        private bool EntityExists(Guid entityId)
+            => _entities.TryGetValue(entityId, out var e) && !e.Missing;
+
+        /// <summary>
+        /// Removes the given series from their gauges. Several sources can feed one
+        /// series, so a series that a live source still publishes is kept.
+        /// </summary>
+        private int SweepStaleSeries(List<PublishedSeries> stale)
+        {
+            var live = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var p in _published.Values)
+                live.Add(SeriesKey(p));
+
+            var handled = new HashSet<string>(StringComparer.Ordinal);
+            int removed = 0;
+
+            foreach (var p in stale)
+            {
+                // An unlabelled gauge has a single series that cannot be removed.
+                if (p.Labels.Length == 0)
+                    continue;
+
+                string key = SeriesKey(p);
+                if (live.Contains(key) || !handled.Add(key))
+                    continue;
+
+                p.Gauge.RemoveLabelled(p.Labels);
+                removed++;
+            }
+
+            return removed;
+        }
+
+        private static string SeriesKey(PublishedSeries p)
+            => p.Gauge.Name + "\u0001" + string.Join("\u0001", p.Labels);
+
+        private static bool SameLabels(string[] a, string[] b)
+        {
+            if (a.Length != b.Length)
+                return false;
+
+            for (int i = 0; i < a.Length; i++)
+            {
+                if (!string.Equals(a[i], b[i], StringComparison.Ordinal))
+                    return false;
+            }
+
+            return true;
         }
 
         private static string ExtractInstanceName(string fullName)
@@ -543,12 +701,18 @@ WHERE TimeSampled > @LastSync
 
                 if (!_latest.TryGetValue(sourceId, out var existing) || ts > existing.Timestamp)
                 {
+                    var entity = _entities.TryGetValue(src.EntityId, out var e) ? e : LoadEntityOnDemand(src.EntityId);
+
+                    // Deleted in SCOM: its samples are not exported.
+                    if (entity.Missing)
+                        continue;
+
                     _latest[sourceId] = new PerfSample
                     {
                         Value = val,
                         Timestamp = ts,
                         InstanceName = src.InstanceName,
-                        Entity  = _entities.TryGetValue(src.EntityId,  out var e) ? e : LoadEntityOnDemand(src.EntityId),
+                        Entity  = entity,
                         Counter = _counters.TryGetValue(src.CounterId, out var c) ? c : LoadCounterOnDemand(src.CounterId)
                     };
 
@@ -622,6 +786,11 @@ WHERE TimeSampled > @LastSync
             if (_settings.SeedLookbackHours <= 0)
                 return;
 
+            // Rows older than SeriesMaxAgeHours would be expired right after seeding.
+            int lookbackHours = _settings.SeriesMaxAgeHours > 0
+                ? Math.Min(_settings.SeedLookbackHours, _settings.SeriesMaxAgeHours)
+                : _settings.SeedLookbackHours;
+
             string idClause = "";
             int wanted = 0;
 
@@ -662,18 +831,26 @@ CROSS APPLY (
 
             var sw = Stopwatch.StartNew();
             var rows = new List<(int SourceId, double Val, DateTime Ts)>();
+            int accepted;
 
             try
             {
-                using var conn = new SqlConnection(_connString);
-                using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
-                cmd.Parameters.AddWithValue("@Since", DateTime.UtcNow.AddHours(-_settings.SeedLookbackHours));
-                conn.Open();
-                using var r = cmd.ExecuteReader();
-                while (r.Read())
-                    rows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
+                using (var conn = new SqlConnection(_connString))
+                using (var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 })
+                {
+                    cmd.Parameters.AddWithValue("@Since", DateTime.UtcNow.AddHours(-lookbackHours));
+                    conn.Open();
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read())
+                        rows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
+                }
+
+                SqlQueryDuration.WithLabels("seed").Observe(sw.Elapsed.TotalSeconds);
+
+                // Apply after the reader is closed: on-demand loads open their own connections.
+                accepted = ApplyRows(rows, _lastSyncTime, countLate: false);
             }
-            catch (SqlException ex)
+            catch (Exception ex)
             {
                 _log.LogWarning(ex,
                     "Seeding latest performance samples failed after {ElapsedMs}ms; continuing without it",
@@ -681,24 +858,19 @@ CROSS APPLY (
                 return;
             }
 
-            SqlQueryDuration.WithLabels("seed").Observe(sw.Elapsed.TotalSeconds);
-
-            // Apply after the reader is closed: on-demand loads open their own connections.
-            int accepted = ApplyRows(rows, _lastSyncTime, countLate: false);
-
             if (_sourceIds == null)
                 _seededUnfiltered = true;
 
             _log.LogInformation(
                 "Seeded {Accepted} performance sources from the last {Hours}h ({Rows} rows, {Wanted} wanted) in {ElapsedMs}ms",
-                accepted, _settings.SeedLookbackHours, rows.Count, wanted, sw.ElapsedMilliseconds);
+                accepted, lookbackHours, rows.Count, wanted, sw.ElapsedMilliseconds);
         }
 
         // -------------------------------
         // METADATA
         // -------------------------------
 
-        private void LoadManagedTypes()
+        private void LoadManagedTypes(Dictionary<Guid, string> target)
         {
             const string sql = "SELECT ManagedTypeId, TypeName FROM dbo.ManagedType";
             var sw = Stopwatch.StartNew();
@@ -710,7 +882,7 @@ CROSS APPLY (
             while (r.Read())
             {
                 if (!r.IsDBNull(0) && !r.IsDBNull(1))
-                    _managedTypes[r.GetGuid(0)] = r.GetString(1);
+                    target[r.GetGuid(0)] = r.GetString(1);
             }
 
             sw.Stop();
@@ -719,10 +891,10 @@ CROSS APPLY (
             if (sw.Elapsed.TotalSeconds > 10.0)
                 _log.LogWarning(
                     "Slow SQL query: load_managed_types took {ElapsedSeconds:F1}s ({Count} rows)",
-                    sw.Elapsed.TotalSeconds, _managedTypes.Count);
+                    sw.Elapsed.TotalSeconds, target.Count);
         }
 
-        private void LoadCounters()
+        private void LoadCounters(Dictionary<Guid, CounterInfo> target)
         {
             const string sql = "SELECT PerformanceCounterId, CounterName, ObjectName FROM dbo.PerformanceCounter";
             var sw = Stopwatch.StartNew();
@@ -740,7 +912,7 @@ CROSS APPLY (
                     ObjectName  = r.IsDBNull(2) ? "" : r.GetString(2)
                 };
                 info.LookupKey = MakeKey(info.ObjectName, info.CounterName);
-                _counters[info.PerformanceCounterId] = info;
+                target[info.PerformanceCounterId] = info;
             }
 
             sw.Stop();
@@ -749,10 +921,10 @@ CROSS APPLY (
             if (sw.Elapsed.TotalSeconds > 10.0)
                 _log.LogWarning(
                     "Slow SQL query: load_counters took {ElapsedSeconds:F1}s ({CounterCount} rows)",
-                    sw.Elapsed.TotalSeconds, _counters.Count);
+                    sw.Elapsed.TotalSeconds, target.Count);
         }
 
-        private void LoadEntities()
+        private void LoadEntities(Dictionary<Guid, EntityInfo> target, Dictionary<Guid, string> managedTypes)
         {
             // BaseManagedTypeId is used to look up TypeName from the _managedTypes cache,
             // avoiding a JOIN on every load.
@@ -770,9 +942,9 @@ WHERE IsDeleted = 0";
             while (r.Read())
             {
                 var typeId = r.IsDBNull(4) ? Guid.Empty : r.GetGuid(4);
-                _managedTypes.TryGetValue(typeId, out var typeName);
+                managedTypes.TryGetValue(typeId, out var typeName);
 
-                _entities[r.GetGuid(0)] = new EntityInfo
+                target[r.GetGuid(0)] = new EntityInfo
                 {
                     BaseManagedEntityId = r.GetGuid(0),
                     DisplayName = r.IsDBNull(1) ? "" : r.GetString(1),
@@ -788,10 +960,10 @@ WHERE IsDeleted = 0";
             if (sw.Elapsed.TotalSeconds > 10.0)
                 _log.LogWarning(
                     "Slow SQL query: load_entities took {ElapsedSeconds:F1}s ({EntityCount} rows)",
-                    sw.Elapsed.TotalSeconds, _entities.Count);
+                    sw.Elapsed.TotalSeconds, target.Count);
         }
 
-        private void LoadPerfSources()
+        private void LoadPerfSources(Dictionary<int, PerfSourceInfo> target)
         {
             const string sql = @"
 SELECT PerformanceSourceInternalId, BaseManagedEntityId, PerformanceCounterId, PerfmonInstanceName
@@ -805,7 +977,7 @@ FROM dbo.PerformanceSource WITH (NOLOCK)";
             using var r = cmd.ExecuteReader();
             while (r.Read())
             {
-                _perfSources[r.GetInt32(0)] = new PerfSourceInfo
+                target[r.GetInt32(0)] = new PerfSourceInfo
                 {
                     EntityId     = r.GetGuid(1),
                     CounterId    = r.GetGuid(2),
@@ -819,7 +991,7 @@ FROM dbo.PerformanceSource WITH (NOLOCK)";
             if (sw.Elapsed.TotalSeconds > 10.0)
                 _log.LogWarning(
                     "Slow SQL query: load_perf_sources took {ElapsedSeconds:F1}s ({Count} rows)",
-                    sw.Elapsed.TotalSeconds, _perfSources.Count);
+                    sw.Elapsed.TotalSeconds, target.Count);
         }
 
         private PerfSourceInfo LoadPerfSourceOnDemand(int sourceId)
@@ -945,10 +1117,13 @@ WHERE BaseManagedEntityId = @id AND IsDeleted = 0";
             }
             else
             {
+                // Not found with IsDeleted = 0: the entity was deleted in SCOM. Cached
+                // as a negative entry so it is not queried on every poll.
                 result = _entities[id] = new EntityInfo
                 {
                     BaseManagedEntityId = id,
-                    DisplayName = $"Entity_{id}"
+                    DisplayName = $"Entity_{id}",
+                    Missing = true
                 };
             }
 

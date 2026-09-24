@@ -45,6 +45,12 @@ namespace ScomDbExporter.Config
         // collected counters are exported immediately. 0 = disabled.
         public int SeedLookbackHours { get; set; } = 48;
 
+        // Metrics module: a series whose newest sample is older than this is removed
+        // from the output (a rule that was disabled, or a source that stopped
+        // reporting, would otherwise export its last value forever). Must be longer
+        // than your slowest collection interval and SeedLookbackHours. 0 = never expire.
+        public int SeriesMaxAgeHours { get; set; } = 168;
+
         // SCOM group display names. Null/empty = no filter.
         public string[] Groups { get; set; }
     }

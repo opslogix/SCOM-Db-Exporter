@@ -89,7 +89,8 @@ The `GroupResolver` block controls how SCOM group memberships are resolved when 
 |  | `PollOverlapMinutes` | How far behind the newest sample seen each poll re-reads. Samples reach the SCOM DB seconds to minutes after their `TimeSampled`; without an overlap they would be skipped. Must exceed the largest sample-to-insert delay in your environment. Default `15`; `0` disables the overlap. See [Late-arriving performance samples](#late-arriving-performance-samples). |
 |  | `CatchUpSeconds` | Cadence of the overlapping catch-up query when no group filter narrows the query (see below). Default `60`. |
 |  | `SeedLookbackHours` | On startup, load the latest sample per performance source from this many hours back so rarely collected counters (hourly, daily) are exported immediately. Should be longer than your slowest collection interval and no longer than SCOM's performance data retention. Default `48`; `0` disables seeding. |
-|  | `MetadataRefreshMinutes` | How often entity, counter and performance-source caches are reloaded. Default `30`. |
+|  | `SeriesMaxAgeHours` | A series whose newest sample is older than this stops being exported. Must be longer than your slowest collection interval; values below `SeedLookbackHours` shorten the seed window to match. Default `168` (7 days, SCOM's default retention of performance data); `0` disables expiry. See [Stale series and metadata refresh](#stale-series-and-metadata-refresh). |
+|  | `MetadataRefreshMinutes` | How often entity, counter and performance-source caches are reloaded. If a reload fails, the previous caches stay in use and it is retried after one minute. Default `30`. |
 |  | `Groups` | Optional `string[]` of SCOM group display names to filter to. Omitted, `null`, or `[]` means **no filter** — every entity is exported (default). See [Filtering by SCOM Groups](#filtering-by-scom-groups). |
 | **State** | `Enabled` | Enable/disable entity health state collection |
 |  | `PollSeconds` | How often to query SCOM for state changes (incremental on `LastModified`) |
@@ -210,6 +211,20 @@ The Performance module avoids this in three ways:
 - **Seeding.** On startup (and when sources are added by a refresh) the latest sample per source within `SeedLookbackHours` is loaded, so hourly or daily counters do not have to wait for their next sample after a restart.
 
 The `scom_perf_late_rows_total` counter shows how many samples were accepted that a plain "newer than the newest seen" poll would have skipped. Set the log level to `Debug` to see per-poll row counts, the overlap in use and the seed results.
+
+## Stale series and metadata refresh
+
+The Performance module exports the newest sample of every performance source as a gauge. A gauge keeps its value until it is removed, so the module removes series that should no longer be exported:
+
+| Situation | What happens |
+|-----------|--------------|
+| The entity leaves the configured `Groups` (membership change, or the entity is removed from the group) | Its series disappear on the next publish, within one `PollSeconds` after the group membership refresh (`GroupResolver.RefreshMinutes`). |
+| The entity is deleted in SCOM | Its series disappear after the next metadata refresh (`MetadataRefreshMinutes`), and its samples are no longer exported. |
+| The source stops reporting (for example the collection rule is disabled) | The series disappears once its newest sample is older than `SeriesMaxAgeHours`. |
+
+A series removed because the entity left the groups returns immediately when the entity rejoins them; one removed because it was deleted or expired returns when a new sample arrives for its source. When series are removed, the module logs `Removed N stale series` at `Information` level with the reasons.
+
+Metadata refresh (`MetadataRefreshMinutes`) reloads the entity, counter and performance-source caches into new dictionaries and switches to them only when every query has succeeded. If the database is unavailable during a refresh, the previous caches stay in use, polling continues, and the refresh is retried after one minute.
 
 ## Performance Metric Mappings
 
