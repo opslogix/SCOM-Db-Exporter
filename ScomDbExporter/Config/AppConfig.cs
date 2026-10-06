@@ -54,6 +54,12 @@ namespace ScomDbExporter.Config
         // more = the single-step lookup of every source.
         public int SeedFastWindowMinutes { get; set; } = 60;
 
+        // Metrics module: a series whose newest sample is older than this is removed
+        // from the output (a rule that was disabled, or a source that stopped
+        // reporting, would otherwise export its last value forever). Must be longer
+        // than your slowest collection interval and SeedLookbackHours. 0 = never expire.
+        public int SeriesMaxAgeHours { get; set; } = 168;
+
         // SCOM group display names. Null/empty = no filter.
         public string[] Groups { get; set; }
     }
