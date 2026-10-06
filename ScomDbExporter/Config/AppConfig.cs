@@ -68,6 +68,25 @@ namespace ScomDbExporter.Config
     {
         // How often to run a full reconcile (rather than incremental) to prune deleted entities.
         public int FullReconcileMinutes { get; set; } = 10;
+
+        // Optional export of unit monitor state (scom_monitor_health_state). Off by default.
+        public MonitorStateConfig MonitorState { get; set; } = new MonitorStateConfig();
+    }
+
+    public class MonitorStateConfig
+    {
+        // Off by default: the exporter then reads only System.Health.EntityState.
+        public bool Enabled { get; set; } = false;
+
+        // LIKE patterns on the monitor name (% = any text, _ = one character). A unit
+        // monitor is exported when its name matches at least one pattern. Enabled with
+        // no patterns exports nothing (a warning is logged); use "%" for every unit monitor.
+        public string[] NamePatterns { get; set; }
+
+        // Safety limit: when the patterns select more state rows than this, nothing is
+        // exported and a warning is logged, so a pattern that is too broad cannot flood
+        // /state. The count is made before the State Groups filter is applied.
+        public int MaxSeries { get; set; } = 5000;
     }
 
     public class AlertModuleToggle : ModuleToggle

@@ -96,6 +96,7 @@ The `GroupResolver` block controls how SCOM group memberships are resolved when 
 | **State** | `Enabled` | Enable/disable entity health state collection |
 |  | `PollSeconds` | How often to query SCOM for state changes (incremental on `LastModified`) |
 |  | `FullReconcileMinutes` | How often to run a full state query instead of an incremental one. The full query prunes entries that no longer exist in SCOM. Default `10`. |
+|  | `MonitorState` | Optional export of unit monitor state as `scom_monitor_health_state` (object with `Enabled`, `NamePatterns`, `MaxSeries`). **Off by default.** See [Unit monitor state](#unit-monitor-state). |
 |  | `Groups` | Optional `string[]` of SCOM group display names to filter to. Omitted, `null`, or `[]` means **no filter** — every entity is exported (default). See [Filtering by SCOM Groups](#filtering-by-scom-groups). |
 | **Alert** | `Enabled` | Enable/disable alert collection |
 |  | `PollSeconds` | How often to query SCOM for alert changes (incremental on `LastModified`) |
@@ -200,6 +201,40 @@ If every module's `Groups` is empty/omitted, the resolver does not run the SCOM 
 - **Nested groups are not transitively expanded** — only direct members of the named groups (plus their hosted children) are included. If you have a parent group whose only members are other groups, list the child groups explicitly in `Groups`.
 
 If multiple modules reference different groups, they are resolved together — one DB round-trip per refresh, regardless of how many modules use grouping.
+
+## Unit monitor state
+
+By default `/state` contains one series per entity (`scom_entity_health_state`, from the monitor `System.Health.EntityState`). Unit monitors have their own state rows (for example a service monitor with "Service is running" / "Service is not running") and are not part of that. They can be exported as a separate metric, selected by monitor name. The feature is **off by default**.
+
+```json
+"State": {
+  "Enabled": true,
+  "MonitorState": {
+    "Enabled": true,
+    "NamePatterns": [ "%snc_mid_%", "Veeam.%" ],
+    "MaxSeries": 5000
+  }
+}
+```
+
+| Setting | Description |
+|---|---|
+| `Enabled` | Default `false`. When `false` no extra query is run and `/state` is unchanged. |
+| `NamePatterns` | SQL `LIKE` patterns on the monitor name (`%` = any text, `_` = one character). A unit monitor is exported when its name matches **at least one** pattern. Enabled with no patterns exports nothing and logs a warning; use `"%"` to export every unit monitor. |
+| `MaxSeries` | Safety limit, default `5000`. If the patterns select more state rows than this, nothing is exported and a warning is logged. The count is made before the `Groups` filter. |
+
+The output (appended to `/state`):
+
+```
+scom_monitor_health_state{monitor_name="...",instance="server01",full_name="...",display_name="..."} 1
+```
+
+- Value `1` = Healthy, `2` = Warning, `3` = Critical. Rows with health state 0 (not initialised or not monitored) are not exported; a monitor that falls back to 0 disappears.
+- `instance` is the part of `full_name` after the last colon, like the `instance` label of the performance metrics (for an entity of a Windows computer class it is the server name).
+- Only unit monitors are exported (not aggregate or dependency monitors such as `System.Health.AvailabilityState`).
+- The `Groups` setting of the State module applies to the monitor state too.
+- Monitors that are deleted, or entities that are deleted, disappear at the next full reconcile (`FullReconcileMinutes`); the monitors matching the patterns are looked up again at each full reconcile.
+- Cost: the queries read `dbo.State` like the entity state does. In the environments measured (see `Benchmark/`) a pattern that selects a few monitors costs about 10 ms per query; all unit monitors with health state above 0 would be 3.4 times (Scania) to 1.8 times (a large environment) the number of series of the entity state, so keep the patterns narrow.
 
 ## Late-arriving performance samples
 

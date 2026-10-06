@@ -596,7 +596,7 @@ namespace ScomDbExporter.Modules
             return true;
         }
 
-        private static string ExtractInstanceName(string fullName)
+        internal static string ExtractInstanceName(string fullName)
         {
             if (string.IsNullOrWhiteSpace(fullName))
                 return "";

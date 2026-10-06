@@ -74,6 +74,25 @@ namespace ScomDbExporter.Http
                 sb.Append("\n");
             }
 
+            if (_state.MonitorStateEnabled)
+            {
+                sb.Append("# HELP scom_monitor_health_state SCOM unit monitor health state (1=Healthy,2=Warning,3=Critical); only monitors matching Modules:State:MonitorState:NamePatterns\n");
+                sb.Append("# TYPE scom_monitor_health_state gauge\n");
+
+                foreach (var m in _state.CurrentMonitorState)
+                {
+                    sb.Append("scom_monitor_health_state");
+                    sb.Append("{");
+                    sb.Append("monitor_name=\"").Append(Escape(m.MonitorName)).Append("\",");
+                    sb.Append("instance=\"").Append(Escape(PerformanceExporter.ExtractInstanceName(m.FullName))).Append("\",");
+                    sb.Append("full_name=\"").Append(Escape(m.FullName)).Append("\",");
+                    sb.Append("display_name=\"").Append(Escape(m.DisplayName)).Append("\"");
+                    sb.Append("} ");
+                    sb.Append(m.HealthState);
+                    sb.Append("\n");
+                }
+            }
+
             return sb.ToString();
         }
 
