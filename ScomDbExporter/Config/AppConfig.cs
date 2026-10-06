@@ -45,6 +45,15 @@ namespace ScomDbExporter.Config
         // collected counters are exported immediately. 0 = disabled.
         public int SeedLookbackHours { get; set; } = 48;
 
+        // Metrics module: the seed first takes the newest row per source from the last
+        // this many minutes in one pass over the performance data, and only looks up
+        // the sources that had no row in that window (rarely collected counters) one
+        // by one over the whole SeedLookbackHours. Far cheaper than looking up every
+        // source. Should be longer than the usual collection interval (default rules
+        // collect every 5 - 15 minutes). 0, or a value of SeedLookbackHours * 60 or
+        // more = the single-step lookup of every source.
+        public int SeedFastWindowMinutes { get; set; } = 60;
+
         // Metrics module: a series whose newest sample is older than this is removed
         // from the output (a rule that was disabled, or a source that stopped
         // reporting, would otherwise export its last value forever). Must be longer

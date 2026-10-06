@@ -781,6 +781,13 @@ WHERE TimeSampled > @LastSync
         /// the query is source-scoped; the unscoped variant covers the whole DB and
         /// runs once. Best-effort: a SQL failure only logs a warning.
         /// </summary>
+        /// <remarks>
+        /// By default the seed runs in two steps (see SeedFastWindowMinutes): the newest
+        /// row per source from the last few minutes in one pass, then a lookup per
+        /// source for the sources that had none. The single-step lookup of every source
+        /// costs one index seek per source in every PerformanceData table inside the
+        /// look-back window and dominated the start-up time. Both forms return the same rows.
+        /// </remarks>
         private void SeedLatest()
         {
             if (_settings.SeedLookbackHours <= 0)
@@ -791,7 +798,7 @@ WHERE TimeSampled > @LastSync
                 ? Math.Min(_settings.SeedLookbackHours, _settings.SeriesMaxAgeHours)
                 : _settings.SeedLookbackHours;
 
-            string idClause = "";
+            string idList = null;
             int wanted = 0;
 
             if (_sourceIds != null)
@@ -807,7 +814,7 @@ WHERE TimeSampled > @LastSync
                     return;
 
                 wanted = missing.Count;
-                idClause = "\nWHERE ps.PerformanceSourceInternalId IN (" + string.Join(",", missing) + ")";
+                idList = string.Join(",", missing);
             }
             else
             {
@@ -816,6 +823,95 @@ WHERE TimeSampled > @LastSync
 
                 _log.LogInformation("Seeding latest samples for all performance sources (no group scope); this can take a while");
             }
+
+            int fastMinutes = _settings.SeedFastWindowMinutes;
+            bool tiered = fastMinutes > 0 && fastMinutes < lookbackHours * 60;
+
+            var sw = Stopwatch.StartNew();
+            var rows = new List<(int SourceId, double Val, DateTime Ts)>();
+            int fastRows = 0;
+            long fastMs = 0;
+            bool read = false;
+
+            if (tiered)
+            {
+                try
+                {
+                    ReadSeedRowsTiered(idList, lookbackHours, fastMinutes, rows, out fastRows, out fastMs, sw);
+                    read = true;
+                }
+                catch (SqlException ex) when (!IsTimeout(ex))
+                {
+                    _log.LogWarning(ex,
+                        "Two-step seed failed after {ElapsedMs}ms; falling back to the single-step seed",
+                        sw.ElapsedMilliseconds);
+                    rows.Clear();
+                    fastRows = 0;
+                    fastMs = 0;
+                }
+                catch (SqlException ex)
+                {
+                    _log.LogWarning(ex,
+                        "Seeding latest performance samples timed out after {ElapsedMs}ms; continuing without it",
+                        sw.ElapsedMilliseconds);
+                    return;
+                }
+            }
+
+            if (!read)
+            {
+                try
+                {
+                    ReadSeedRowsSingleStep(idList, lookbackHours, rows);
+                }
+                catch (SqlException ex)
+                {
+                    _log.LogWarning(ex,
+                        "Seeding latest performance samples failed after {ElapsedMs}ms; continuing without it",
+                        sw.ElapsedMilliseconds);
+                    return;
+                }
+            }
+
+            SqlQueryDuration.WithLabels("seed").Observe(sw.Elapsed.TotalSeconds);
+
+            // Apply after the reader is closed: on-demand loads open their own connections.
+            int accepted = ApplyRows(rows, _lastSyncTime, countLate: false);
+
+            if (_sourceIds == null)
+                _seededUnfiltered = true;
+
+            if (read)
+            {
+                _log.LogInformation(
+                    "Seeded {Accepted} performance sources from the last {Hours}h ({Rows} rows, {Wanted} wanted) in {ElapsedMs}ms " +
+                    "(newest rows of the last {FastMinutes} min: {FastRows} rows in {FastMs}ms; looked up one by one: {SlowRows} rows in {SlowMs}ms)",
+                    accepted, lookbackHours, rows.Count, wanted, sw.ElapsedMilliseconds,
+                    fastMinutes, fastRows, fastMs, rows.Count - fastRows, sw.ElapsedMilliseconds - fastMs);
+            }
+            else
+            {
+                _log.LogInformation(
+                    "Seeded {Accepted} performance sources from the last {Hours}h ({Rows} rows, {Wanted} wanted) in {ElapsedMs}ms",
+                    accepted, lookbackHours, rows.Count, wanted, sw.ElapsedMilliseconds);
+            }
+        }
+
+        private static bool IsTimeout(SqlException ex)
+        {
+            // -2 = client timeout (CommandTimeout elapsed). Retrying with another form would only wait again.
+            return ex.Number == -2;
+        }
+
+        /// <summary>
+        /// Single-step seed: one lookup of the newest sample per source in every
+        /// PerformanceData table inside the look-back window.
+        /// </summary>
+        private void ReadSeedRowsSingleStep(string idList, int lookbackHours, List<(int SourceId, double Val, DateTime Ts)> rows)
+        {
+            string idClause = idList == null
+                ? ""
+                : "\nWHERE ps.PerformanceSourceInternalId IN (" + idList + ")";
 
             string sql = @"
 SELECT ps.PerformanceSourceInternalId, x.SampleValue, x.TimeSampled
@@ -829,41 +925,91 @@ CROSS APPLY (
     ORDER BY pd.TimeSampled DESC
 ) x" + idClause + ";";
 
-            var sw = Stopwatch.StartNew();
-            var rows = new List<(int SourceId, double Val, DateTime Ts)>();
-            int accepted;
+            using var conn = new SqlConnection(_connString);
+            using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
+            cmd.Parameters.AddWithValue("@Since", DateTime.UtcNow.AddHours(-lookbackHours));
+            conn.Open();
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+                rows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
+        }
 
-            try
+        /// <summary>
+        /// Two-step seed in one round trip. Step 1 takes the newest row per source from
+        /// the last <paramref name="fastMinutes"/> minutes in a single pass over the
+        /// performance data. Step 2 looks up, one by one over the whole look-back
+        /// window, only the sources that step 1 did not find (counters collected
+        /// rarely, or not at all). The first result set holds the step 1 rows, the
+        /// second the step 2 rows.
+        /// </summary>
+        private void ReadSeedRowsTiered(
+            string idList,
+            int lookbackHours,
+            int fastMinutes,
+            List<(int SourceId, double Val, DateTime Ts)> rows,
+            out int fastRows,
+            out long fastMs,
+            Stopwatch sw)
+        {
+            string idFilterPd = idList == null
+                ? ""
+                : "\n      AND pd.PerformanceSourceInternalId IN (" + idList + ")";
+            string idFilterPs = idList == null
+                ? ""
+                : "\n  AND ps.PerformanceSourceInternalId IN (" + idList + ")";
+
+            string sql = @"
+SET NOCOUNT ON;
+
+CREATE TABLE #SeedFast (
+    PerformanceSourceInternalId int NOT NULL PRIMARY KEY,
+    SampleValue float NOT NULL,
+    TimeSampled datetime NOT NULL);
+
+INSERT INTO #SeedFast (PerformanceSourceInternalId, SampleValue, TimeSampled)
+SELECT s.PerformanceSourceInternalId, s.SampleValue, s.TimeSampled
+FROM (
+    SELECT pd.PerformanceSourceInternalId, pd.SampleValue, pd.TimeSampled,
+           ROW_NUMBER() OVER (PARTITION BY pd.PerformanceSourceInternalId
+                              ORDER BY pd.TimeSampled DESC) AS rn
+    FROM dbo.PerformanceDataAllView pd WITH (NOLOCK)
+    WHERE pd.TimeSampled > @FastSince
+      AND pd.SampleValue IS NOT NULL" + idFilterPd + @"
+) s
+WHERE s.rn = 1;
+
+SELECT PerformanceSourceInternalId, SampleValue, TimeSampled FROM #SeedFast;
+
+SELECT ps.PerformanceSourceInternalId, x.SampleValue, x.TimeSampled
+FROM dbo.PerformanceSource ps WITH (NOLOCK)
+CROSS APPLY (
+    SELECT TOP (1) pd.SampleValue, pd.TimeSampled
+    FROM dbo.PerformanceDataAllView pd WITH (NOLOCK)
+    WHERE pd.PerformanceSourceInternalId = ps.PerformanceSourceInternalId
+      AND pd.TimeSampled > @Since
+      AND pd.SampleValue IS NOT NULL
+    ORDER BY pd.TimeSampled DESC
+) x
+WHERE NOT EXISTS (SELECT 1 FROM #SeedFast f WHERE f.PerformanceSourceInternalId = ps.PerformanceSourceInternalId)" + idFilterPs + ";";
+
+            using var conn = new SqlConnection(_connString);
+            using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
+            var now = DateTime.UtcNow;
+            cmd.Parameters.AddWithValue("@Since", now.AddHours(-lookbackHours));
+            cmd.Parameters.AddWithValue("@FastSince", now.AddMinutes(-fastMinutes));
+            conn.Open();
+            using var r = cmd.ExecuteReader();
+
+            while (r.Read())
+                rows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
+            fastRows = rows.Count;
+            fastMs = sw.ElapsedMilliseconds;
+
+            if (r.NextResult())
             {
-                using (var conn = new SqlConnection(_connString))
-                using (var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 })
-                {
-                    cmd.Parameters.AddWithValue("@Since", DateTime.UtcNow.AddHours(-lookbackHours));
-                    conn.Open();
-                    using var r = cmd.ExecuteReader();
-                    while (r.Read())
-                        rows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
-                }
-
-                SqlQueryDuration.WithLabels("seed").Observe(sw.Elapsed.TotalSeconds);
-
-                // Apply after the reader is closed: on-demand loads open their own connections.
-                accepted = ApplyRows(rows, _lastSyncTime, countLate: false);
+                while (r.Read())
+                    rows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
             }
-            catch (Exception ex)
-            {
-                _log.LogWarning(ex,
-                    "Seeding latest performance samples failed after {ElapsedMs}ms; continuing without it",
-                    sw.ElapsedMilliseconds);
-                return;
-            }
-
-            if (_sourceIds == null)
-                _seededUnfiltered = true;
-
-            _log.LogInformation(
-                "Seeded {Accepted} performance sources from the last {Hours}h ({Rows} rows, {Wanted} wanted) in {ElapsedMs}ms",
-                accepted, lookbackHours, rows.Count, wanted, sw.ElapsedMilliseconds);
         }
 
         // -------------------------------
