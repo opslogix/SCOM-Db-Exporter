@@ -93,6 +93,15 @@ namespace ScomDbExporter.Config
     {
         public bool IncludeClosedAlerts { get; set; } = false;
         public int ClosedAlertRetentionMinutes { get; set; } = 60;
+
+        // SQL command timeout for the alert query. The default 30 s is too short on a cold
+        // buffer cache, where reading the large Context column is disk bound.
+        public int SqlTimeoutSeconds { get; set; } = 120;
+
+        // The first poll after startup only loads closed alerts modified within this many
+        // days (open alerts are always loaded). Later polls are incremental and emit every
+        // closure. Only used when IncludeClosedAlerts is true.
+        public int BootstrapClosedAlertDays { get; set; } = 1;
         public string AlloyEndpoint { get; set; } = "http://localhost:9465/loki/api/v1/raw";
     }
 
