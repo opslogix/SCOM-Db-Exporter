@@ -6,6 +6,7 @@ using System.Net.Http;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
+using Prometheus;
 using ScomDbExporter.Config;
 using ScomDbExporter.Models;
 
@@ -25,6 +26,10 @@ namespace ScomDbExporter.Modules
         // SQL datetime floor is 1753-01-01; use a safely-typed sentinel so the
         // bootstrap query fetches all currently-open alerts.
         private static readonly DateTime SqlSafeMin = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        private static readonly Gauge LastSuccessfulPoll = Metrics.CreateGauge(
+            "scom_alert_last_successful_poll_timestamp_seconds",
+            "Unix time (seconds) of the last alert query that completed successfully; 0 until the first one");
 
         private DateTime _nextRunUtc = DateTime.MinValue;
         private DateTime _lastSyncTime = SqlSafeMin;
@@ -162,6 +167,7 @@ WHERE a.LastModified > @LastSync
                 return;
             }
 
+            LastSuccessfulPoll.Set(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
             _consecutiveFailures = 0;
             _bootstrapped = true;
 
