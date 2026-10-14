@@ -101,6 +101,8 @@ The `GroupResolver` block controls how SCOM group memberships are resolved when 
 | **Alert** | `Enabled` | Enable/disable alert collection |
 |  | `PollSeconds` | How often to query SCOM for alert changes (incremental on `LastModified`) |
 |  | `IncludeClosedAlerts` | Include closed alerts (ResolutionState=255) in queries |
+|  | `SqlTimeoutSeconds` | SQL command timeout for the alert query. Default `120`. The query reads the large `Context` column, which is disk bound on a cold SQL buffer cache. |
+|  | `BootstrapClosedAlertDays` | The first poll after startup only loads closed alerts modified within this many days (open alerts are always loaded). Default `1`. Later polls emit every closure. |
 |  | `AlloyEndpoint` | URL of Alloy's loki.source.api endpoint for pushing alerts |
 |  | `Groups` | Optional `string[]` of SCOM group display names to filter to. Omitted, `null`, or `[]` means **no filter** — every entity is exported (default). See [Filtering by SCOM Groups](#filtering-by-scom-groups). |
 
@@ -338,7 +340,8 @@ Each pushed (and `/alerts`-served) alert includes:
 
 The alert exporter only fetches and emits **changes**:
 - The SQL query is incremental on `LastModified` — at each tick only rows whose `LastModified` has advanced since the previous tick are fetched.
-- The first poll after startup loads all currently-open alerts as the bootstrap snapshot, then the exporter stays incremental until restart.
+- The first poll after startup loads all currently-open alerts as the bootstrap snapshot (plus closed alerts from the last `BootstrapClosedAlertDays` days when `IncludeClosedAlerts = true`), then the exporter stays incremental until restart.
+- If the query fails (e.g. SQL timeout), the exporter backs off (doubling `PollSeconds`, capped at 300 s) and retries; the bootstrap is repeated until it succeeds.
 - When an alert closes, its `LastModified` advances and it is emitted exactly once with `resolution_state = 255` (provided `IncludeClosedAlerts = true`; otherwise closures are suppressed).
 - The push and the `/alerts` debug endpoint share the same delta — both reflect the latest poll's changed alerts.
 

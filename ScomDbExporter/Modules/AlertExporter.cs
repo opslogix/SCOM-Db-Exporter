@@ -33,6 +33,9 @@ namespace ScomDbExporter.Modules
 
         private DateTime _nextRunUtc = DateTime.MinValue;
         private DateTime _lastSyncTime = SqlSafeMin;
+        private bool _bootstrapped;
+        private int _consecutiveFailures;
+        private const int MaxBackoffSeconds = 300;
 
         private readonly object _lock = new();
         private List<AlertDto> _changedAlerts = new();
@@ -78,6 +81,8 @@ namespace ScomDbExporter.Modules
         {
             // Incremental on LastModified; first call after startup has _lastSyncTime=MinValue
             // and therefore fetches all currently-open alerts (the bootstrap snapshot).
+            // During bootstrap closed alerts are limited to BootstrapClosedAlertDays so the
+            // first query stays cheap; afterwards every closure is emitted.
             const string sql = @"
 SELECT
     a.AlertId,
@@ -115,7 +120,8 @@ FROM dbo.Alert a WITH (NOLOCK)
 LEFT JOIN dbo.BaseManagedEntity bme WITH (NOLOCK)
     ON a.BaseManagedEntityId = bme.BaseManagedEntityId
 WHERE a.LastModified > @LastSync
-  AND (@IncludeClosed = 1 OR a.ResolutionState <> 255);
+  AND (a.ResolutionState <> 255
+       OR (@IncludeClosed = 1 AND a.LastModified > @ClosedSince));
 ";
 
             var changes = new List<AlertDto>();
@@ -125,9 +131,16 @@ WHERE a.LastModified > @LastSync
             try
             {
                 using var conn = new SqlConnection(_connString);
-                using var cmd = new SqlCommand(sql, conn);
+                using var cmd = new SqlCommand(sql, conn)
+                {
+                    CommandTimeout = Math.Max(30, _settings.SqlTimeoutSeconds)
+                };
+                var closedSince = _bootstrapped
+                    ? SqlSafeMin
+                    : DateTime.UtcNow.AddDays(-Math.Max(0, _settings.BootstrapClosedAlertDays));
                 cmd.Parameters.AddWithValue("@LastSync", _lastSyncTime);
                 cmd.Parameters.AddWithValue("@IncludeClosed", _settings.IncludeClosedAlerts ? 1 : 0);
+                cmd.Parameters.AddWithValue("@ClosedSince", closedSince);
 
                 conn.Open();
                 using var r = cmd.ExecuteReader();
@@ -142,11 +155,21 @@ WHERE a.LastModified > @LastSync
             }
             catch (SqlException ex)
             {
-                _log.LogError(ex, "Alert SQL query failed after {ElapsedMs}ms", sw.ElapsedMilliseconds);
+                // Back off so a slow database is not hit again every PollSeconds.
+                _consecutiveFailures++;
+                var backoff = Math.Min(
+                    Math.Max(1, _settings.PollSeconds) * Math.Pow(2, Math.Min(_consecutiveFailures, 8)),
+                    MaxBackoffSeconds);
+                _nextRunUtc = DateTime.UtcNow.AddSeconds(backoff);
+                _log.LogError(ex,
+                    "Alert SQL query failed after {ElapsedMs}ms (failure {Failures}, retry in {BackoffSeconds}s)",
+                    sw.ElapsedMilliseconds, _consecutiveFailures, (int)backoff);
                 return;
             }
 
             LastSuccessfulPoll.Set(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+            _consecutiveFailures = 0;
+            _bootstrapped = true;
 
             _log.LogDebug(
                 "Loaded {RowCount} alert changes from SQL in {ElapsedMs}ms",
