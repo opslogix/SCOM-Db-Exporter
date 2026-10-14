@@ -248,6 +248,17 @@ The Performance module avoids this in three ways:
 
 The `scom_perf_late_rows_total` counter shows how many samples were accepted that a plain "newer than the newest seen" poll would have skipped. Set the log level to `Debug` to see per-poll row counts, the overlap in use and the seed results.
 
+#### Detecting a stalled data source
+
+Exported values stay on `/metrics` until `SeriesMaxAgeHours` expires them, so a SCOM database that has stopped receiving data (for example after the management group moved to another SQL server) looks healthy for days. Two gauges show this:
+
+| Metric | Meaning |
+|---|---|
+| `scom_perf_newest_sample_timestamp_seconds` | Unix time of the newest performance sample read from the database. `0` until the first sample is read. |
+| `scom_alert_last_successful_poll_timestamp_seconds` | Unix time of the last alert query that completed successfully. `0` until the first one. |
+
+Example alert expressions: `time() - scom_perf_newest_sample_timestamp_seconds > 1800` (no new performance data for 30 minutes) and `time() - scom_alert_last_successful_poll_timestamp_seconds > 300` (alert queries failing). Choose the performance threshold well above your slowest collection interval.
+
 ## Stale series and metadata refresh
 
 The Performance module exports the newest sample of every performance source as a gauge. A gauge keeps its value until it is removed, so the module removes series that should no longer be exported:
