@@ -40,7 +40,8 @@ jobs:
         shell: pwsh
         run: |
           $artifactDir = "artifacts"
-          $zip = "$artifactDir/ScomDbExporter-${{ github.ref_name }}.zip"
+          $safeName = "${{ github.ref_name }}" -replace '[/\\:*?"<>|]', '-'
+          $zip = "$artifactDir/ScomDbExporter-$safeName.zip"
 
           New-Item -ItemType Directory -Force $artifactDir | Out-Null
 
