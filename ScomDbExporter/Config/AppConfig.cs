@@ -30,6 +30,43 @@ namespace ScomDbExporter.Config
         // Picks up newly discovered objects and removes deleted ones without a restart.
         public int MetadataRefreshMinutes { get; set; } = 30;
 
+        // Metrics module: samples reach the DB seconds to minutes after TimeSampled.
+        // Each poll therefore re-reads this many minutes behind the newest sample
+        // seen, so late-arriving rows are not skipped. Must exceed the largest
+        // sample-to-insert delay in the environment. 0 = no overlap (legacy behaviour).
+        public int PollOverlapMinutes { get; set; } = 15;
+
+        // Metrics module: when no group filter narrows the query, the overlapping
+        // catch-up query runs at this cadence instead of on every poll.
+        public int CatchUpSeconds { get; set; } = 60;
+
+        // Metrics module: on startup, and when sources are added, load the latest
+        // sample per performance source from this many hours back so rarely
+        // collected counters are exported immediately. 0 = disabled.
+        public int SeedLookbackHours { get; set; } = 48;
+
+        // Metrics module: the seed first takes the newest row per source from the last
+        // this many minutes in one pass over the performance data, and only looks up
+        // the sources that had no row in that window (rarely collected counters) one
+        // by one over the whole SeedLookbackHours. Far cheaper than looking up every
+        // source. Should be longer than the usual collection interval (default rules
+        // collect every 5 - 15 minutes). 0, or a value of SeedLookbackHours * 60 or
+        // more = the single-step lookup of every source.
+        public int SeedFastWindowMinutes { get; set; } = 60;
+
+        // Metrics module: with a group filter, the performance queries list the
+        // PerformanceSourceInternalIds of the group's sources. A long list makes SQL
+        // Server fail with error 8623 (cannot produce a query plan) because the
+        // performance data view spans many partition tables, so the list is split
+        // into queries of at most this many ids. Lower it if error 8623 persists.
+        public int SourceChunkSize { get; set; } = 100;
+
+        // Metrics module: a series whose newest sample is older than this is removed
+        // from the output (a rule that was disabled, or a source that stopped
+        // reporting, would otherwise export its last value forever). Must be longer
+        // than your slowest collection interval and SeedLookbackHours. 0 = never expire.
+        public int SeriesMaxAgeHours { get; set; } = 168;
+
         // SCOM group display names. Null/empty = no filter.
         public string[] Groups { get; set; }
     }
@@ -38,12 +75,40 @@ namespace ScomDbExporter.Config
     {
         // How often to run a full reconcile (rather than incremental) to prune deleted entities.
         public int FullReconcileMinutes { get; set; } = 10;
+
+        // Optional export of unit monitor state (scom_monitor_health_state). Off by default.
+        public MonitorStateConfig MonitorState { get; set; } = new MonitorStateConfig();
+    }
+
+    public class MonitorStateConfig
+    {
+        // Off by default: the exporter then reads only System.Health.EntityState.
+        public bool Enabled { get; set; } = false;
+
+        // LIKE patterns on the monitor name (% = any text, _ = one character). A unit
+        // monitor is exported when its name matches at least one pattern. Enabled with
+        // no patterns exports nothing (a warning is logged); use "%" for every unit monitor.
+        public string[] NamePatterns { get; set; }
+
+        // Safety limit: when the patterns select more state rows than this, nothing is
+        // exported and a warning is logged, so a pattern that is too broad cannot flood
+        // /state. The count is made before the State Groups filter is applied.
+        public int MaxSeries { get; set; } = 5000;
     }
 
     public class AlertModuleToggle : ModuleToggle
     {
         public bool IncludeClosedAlerts { get; set; } = false;
         public int ClosedAlertRetentionMinutes { get; set; } = 60;
+
+        // SQL command timeout for the alert query. The default 30 s is too short on a cold
+        // buffer cache, where reading the large Context column is disk bound.
+        public int SqlTimeoutSeconds { get; set; } = 120;
+
+        // The first poll after startup only loads closed alerts modified within this many
+        // days (open alerts are always loaded). Later polls are incremental and emit every
+        // closure. Only used when IncludeClosedAlerts is true.
+        public int BootstrapClosedAlertDays { get; set; } = 1;
         public string AlloyEndpoint { get; set; } = "http://localhost:9465/loki/api/v1/raw";
     }
 
