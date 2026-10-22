@@ -54,6 +54,13 @@ namespace ScomDbExporter.Config
         // more = the single-step lookup of every source.
         public int SeedFastWindowMinutes { get; set; } = 60;
 
+        // Metrics module: with a group filter, the performance queries list the
+        // PerformanceSourceInternalIds of the group's sources. A long list makes SQL
+        // Server fail with error 8623 (cannot produce a query plan) because the
+        // performance data view spans many partition tables, so the list is split
+        // into queries of at most this many ids. Lower it if error 8623 persists.
+        public int SourceChunkSize { get; set; } = 100;
+
         // Metrics module: a series whose newest sample is older than this is removed
         // from the output (a rule that was disabled, or a source that stopped
         // reporting, would otherwise export its last value forever). Must be longer
