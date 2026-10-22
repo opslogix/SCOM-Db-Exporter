@@ -29,10 +29,10 @@ namespace ScomDbExporter.Modules
         // parse cost; fall back to the unfiltered query with a sparser catch-up.
         private const int MaxFilteredSources = 2000;
 
-        // Comma-separated PerformanceSourceInternalIds of the group-filtered sources,
-        // or null when the query is not source-scoped. Built from _perfSources, so
-        // it is rebuilt after every metadata or group-membership refresh.
-        private string _sourceFilterSql;
+        // PerformanceSourceInternalIds of the group-filtered sources, or null when the
+        // query is not source-scoped. Built from _perfSources, so it is rebuilt after
+        // every metadata or group-membership refresh. Queries list them in chunks of
+        // SourceChunkSize (see ChunkIds).
         private int[] _sourceIds;
         private DateTime _filterResolverStampUtc = DateTime.MinValue;
         private DateTime _nextCatchUpUtc = DateTime.MinValue;
@@ -625,26 +625,19 @@ namespace ScomDbExporter.Modules
             // unscoped one covers the whole SCOM DB, so it overlaps only at the
             // catch-up cadence and otherwise reads just the rows newer than the watermark.
             var now = DateTime.UtcNow;
-            string sourceFilter = _sourceFilterSql;
+            int[] sourceIds = _sourceIds;
             int overlapMinutes = Math.Max(0, _settings.PollOverlapMinutes);
 
-            bool overlap = overlapMinutes > 0 && (sourceFilter != null || now >= _nextCatchUpUtc);
-            if (overlap && sourceFilter == null)
+            bool overlap = overlapMinutes > 0 && (sourceIds != null || now >= _nextCatchUpUtc);
+            if (overlap && sourceIds == null)
                 _nextCatchUpUtc = now.AddSeconds(Math.Max(1, _settings.CatchUpSeconds));
 
             DateTime watermark = _lastSyncTime;
             DateTime since = overlap ? watermark.AddMinutes(-overlapMinutes) : watermark;
 
             // No JOIN: PerformanceSource is cached in _perfSources. The IN list holds
-            // integers from that cache only.
-            string sql = @"
-SELECT PerformanceSourceInternalId, SampleValue, TimeSampled
-FROM dbo.PerformanceDataAllView WITH (NOLOCK)
-WHERE TimeSampled > @LastSync
-  AND SampleValue IS NOT NULL" +
-                (sourceFilter != null
-                    ? "\n  AND PerformanceSourceInternalId IN (" + sourceFilter + ")"
-                    : "") + ";";
+            // integers from that cache only, split into chunks (see ChunkIds).
+            var chunks = ChunkIds(sourceIds);
 
             var sw = Stopwatch.StartNew();
             var rawRows = new List<(int SourceId, double Val, DateTime Ts)>();
@@ -652,12 +645,24 @@ WHERE TimeSampled > @LastSync
             try
             {
                 using var conn = new SqlConnection(_connString);
-                using var cmd = new SqlCommand(sql, conn);
-                cmd.Parameters.AddWithValue("@LastSync", since);
                 conn.Open();
-                using var r = cmd.ExecuteReader();
-                while (r.Read())
-                    rawRows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
+                foreach (var chunk in chunks)
+                {
+                    string sql = @"
+SELECT PerformanceSourceInternalId, SampleValue, TimeSampled
+FROM dbo.PerformanceDataAllView WITH (NOLOCK)
+WHERE TimeSampled > @LastSync
+  AND SampleValue IS NOT NULL" +
+                        (chunk != null
+                            ? "\n  AND PerformanceSourceInternalId IN (" + chunk + ")"
+                            : "") + ";";
+
+                    using var cmd = new SqlCommand(sql, conn);
+                    cmd.Parameters.AddWithValue("@LastSync", since);
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read())
+                        rawRows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
+                }
             }
             catch (SqlException ex)
             {
@@ -679,8 +684,8 @@ WHERE TimeSampled > @LastSync
 
             _log.LogDebug(
                 "Polled {RowCount} performance rows, {Accepted} new, in {ElapsedMs}ms " +
-                "(since={Since:O}, overlap={Overlap}, sourceScoped={Scoped})",
-                rawRows.Count, accepted, sw.ElapsedMilliseconds, since, overlap, sourceFilter != null);
+                "(since={Since:O}, overlap={Overlap}, sourceScoped={Scoped}, chunks={Chunks})",
+                rawRows.Count, accepted, sw.ElapsedMilliseconds, since, overlap, sourceIds != null, chunks.Count);
         }
 
         /// <summary>
@@ -749,6 +754,35 @@ WHERE TimeSampled > @LastSync
         // SOURCE SCOPE + SEEDING
         // -------------------------------
 
+        private int ChunkSize => Math.Max(1, _settings.SourceChunkSize);
+
+        /// <summary>
+        /// Splits source ids into comma-separated lists of at most SourceChunkSize ids.
+        /// A single IN (...) list over the performance data view can fail with SQL error
+        /// 8623 (no query plan) because the view spans many partition tables. With no
+        /// ids (<paramref name="ids"/> null) the result is one null entry: the unscoped query.
+        /// </summary>
+        private List<string> ChunkIds(IReadOnlyList<int> ids)
+        {
+            var chunks = new List<string>();
+            if (ids == null)
+            {
+                chunks.Add(null);
+                return chunks;
+            }
+
+            int size = ChunkSize;
+            for (int i = 0; i < ids.Count; i += size)
+            {
+                int n = Math.Min(size, ids.Count - i);
+                var part = new string[n];
+                for (int j = 0; j < n; j++)
+                    part[j] = ids[i + j].ToString(System.Globalization.CultureInfo.InvariantCulture);
+                chunks.Add(string.Join(",", part));
+            }
+            return chunks;
+        }
+
         /// <summary>
         /// Rebuilds the list of performance sources that belong to the configured
         /// groups. Leaves the query unscoped when no groups are configured, when the
@@ -757,7 +791,6 @@ WHERE TimeSampled > @LastSync
         private void RebuildSourceFilter()
         {
             _filterResolverStampUtc = _resolver?.LastRefreshUtc ?? DateTime.MinValue;
-            _sourceFilterSql = null;
             _sourceIds = null;
 
             var allowed = _resolver?.GetAllowedBmes(_settings.Groups);
@@ -781,11 +814,10 @@ WHERE TimeSampled > @LastSync
 
             ids.Sort();
             _sourceIds = ids.ToArray();
-            _sourceFilterSql = string.Join(",", _sourceIds);
 
             _log.LogInformation(
-                "Performance queries scoped to {Count} performance sources of the configured groups",
-                _sourceIds.Length);
+                "Performance queries scoped to {Count} performance sources of the configured groups ({Chunks} queries of at most {ChunkSize} ids)",
+                _sourceIds.Length, ChunkIds(_sourceIds).Count, ChunkSize);
         }
 
         /// <summary>
@@ -812,7 +844,7 @@ WHERE TimeSampled > @LastSync
                 ? Math.Min(_settings.SeedLookbackHours, _settings.SeriesMaxAgeHours)
                 : _settings.SeedLookbackHours;
 
-            string idList = null;
+            List<string> idLists;
             int wanted = 0;
 
             if (_sourceIds != null)
@@ -828,12 +860,14 @@ WHERE TimeSampled > @LastSync
                     return;
 
                 wanted = missing.Count;
-                idList = string.Join(",", missing);
+                idLists = ChunkIds(missing);
             }
             else
             {
                 if (_seededUnfiltered)
                     return;
+
+                idLists = ChunkIds(null);
 
                 _log.LogInformation("Seeding latest samples for all performance sources (no group scope); this can take a while");
             }
@@ -845,45 +879,53 @@ WHERE TimeSampled > @LastSync
             var rows = new List<(int SourceId, double Val, DateTime Ts)>();
             int fastRows = 0;
             long fastMs = 0;
-            bool read = false;
+            bool read = true;
 
-            if (tiered)
+            foreach (var idList in idLists)
             {
-                try
-                {
-                    ReadSeedRowsTiered(idList, lookbackHours, fastMinutes, rows, out fastRows, out fastMs, sw);
-                    read = true;
-                }
-                catch (SqlException ex) when (!IsTimeout(ex))
-                {
-                    _log.LogWarning(ex,
-                        "Two-step seed failed after {ElapsedMs}ms; falling back to the single-step seed",
-                        sw.ElapsedMilliseconds);
-                    rows.Clear();
-                    fastRows = 0;
-                    fastMs = 0;
-                }
-                catch (SqlException ex)
-                {
-                    _log.LogWarning(ex,
-                        "Seeding latest performance samples timed out after {ElapsedMs}ms; continuing without it",
-                        sw.ElapsedMilliseconds);
-                    return;
-                }
-            }
+                bool chunkRead = false;
 
-            if (!read)
-            {
-                try
+                if (tiered)
                 {
-                    ReadSeedRowsSingleStep(idList, lookbackHours, rows);
+                    int rowsBefore = rows.Count;
+                    long chunkStartMs = sw.ElapsedMilliseconds;
+                    try
+                    {
+                        ReadSeedRowsTiered(idList, lookbackHours, fastMinutes, rows, out int chunkFastRows, out long chunkFastMs, sw);
+                        fastRows += chunkFastRows;
+                        fastMs += chunkFastMs - chunkStartMs;
+                        chunkRead = true;
+                    }
+                    catch (SqlException ex) when (!IsTimeout(ex))
+                    {
+                        _log.LogWarning(ex,
+                            "Two-step seed failed after {ElapsedMs}ms; falling back to the single-step seed",
+                            sw.ElapsedMilliseconds);
+                        rows.RemoveRange(rowsBefore, rows.Count - rowsBefore);
+                    }
+                    catch (SqlException ex)
+                    {
+                        _log.LogWarning(ex,
+                            "Seeding latest performance samples timed out after {ElapsedMs}ms; continuing without it",
+                            sw.ElapsedMilliseconds);
+                        return;
+                    }
                 }
-                catch (SqlException ex)
+
+                if (!chunkRead)
                 {
-                    _log.LogWarning(ex,
-                        "Seeding latest performance samples failed after {ElapsedMs}ms; continuing without it",
-                        sw.ElapsedMilliseconds);
-                    return;
+                    read = false;
+                    try
+                    {
+                        ReadSeedRowsSingleStep(idList, lookbackHours, rows);
+                    }
+                    catch (SqlException ex)
+                    {
+                        _log.LogWarning(ex,
+                            "Seeding latest performance samples failed after {ElapsedMs}ms; continuing without it",
+                            sw.ElapsedMilliseconds);
+                        return;
+                    }
                 }
             }
 
@@ -1014,9 +1056,10 @@ WHERE NOT EXISTS (SELECT 1 FROM #SeedFast f WHERE f.PerformanceSourceInternalId 
             conn.Open();
             using var r = cmd.ExecuteReader();
 
+            int rowsBefore = rows.Count;
             while (r.Read())
                 rows.Add((r.GetInt32(0), r.GetDouble(1), r.GetDateTime(2)));
-            fastRows = rows.Count;
+            fastRows = rows.Count - rowsBefore;
             fastMs = sw.ElapsedMilliseconds;
 
             if (r.NextResult())
