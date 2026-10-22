@@ -68,12 +68,40 @@ namespace ScomDbExporter.Config
     {
         // How often to run a full reconcile (rather than incremental) to prune deleted entities.
         public int FullReconcileMinutes { get; set; } = 10;
+
+        // Optional export of unit monitor state (scom_monitor_health_state). Off by default.
+        public MonitorStateConfig MonitorState { get; set; } = new MonitorStateConfig();
+    }
+
+    public class MonitorStateConfig
+    {
+        // Off by default: the exporter then reads only System.Health.EntityState.
+        public bool Enabled { get; set; } = false;
+
+        // LIKE patterns on the monitor name (% = any text, _ = one character). A unit
+        // monitor is exported when its name matches at least one pattern. Enabled with
+        // no patterns exports nothing (a warning is logged); use "%" for every unit monitor.
+        public string[] NamePatterns { get; set; }
+
+        // Safety limit: when the patterns select more state rows than this, nothing is
+        // exported and a warning is logged, so a pattern that is too broad cannot flood
+        // /state. The count is made before the State Groups filter is applied.
+        public int MaxSeries { get; set; } = 5000;
     }
 
     public class AlertModuleToggle : ModuleToggle
     {
         public bool IncludeClosedAlerts { get; set; } = false;
         public int ClosedAlertRetentionMinutes { get; set; } = 60;
+
+        // SQL command timeout for the alert query. The default 30 s is too short on a cold
+        // buffer cache, where reading the large Context column is disk bound.
+        public int SqlTimeoutSeconds { get; set; } = 120;
+
+        // The first poll after startup only loads closed alerts modified within this many
+        // days (open alerts are always loaded). Later polls are incremental and emit every
+        // closure. Only used when IncludeClosedAlerts is true.
+        public int BootstrapClosedAlertDays { get; set; } = 1;
         public string AlloyEndpoint { get; set; } = "http://localhost:9465/loki/api/v1/raw";
     }
 

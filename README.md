@@ -96,10 +96,13 @@ The `GroupResolver` block controls how SCOM group memberships are resolved when 
 | **State** | `Enabled` | Enable/disable entity health state collection |
 |  | `PollSeconds` | How often to query SCOM for state changes (incremental on `LastModified`) |
 |  | `FullReconcileMinutes` | How often to run a full state query instead of an incremental one. The full query prunes entries that no longer exist in SCOM. Default `10`. |
+|  | `MonitorState` | Optional export of unit monitor state as `scom_monitor_health_state` (object with `Enabled`, `NamePatterns`, `MaxSeries`). **Off by default.** See [Unit monitor state](#unit-monitor-state). |
 |  | `Groups` | Optional `string[]` of SCOM group display names to filter to. Omitted, `null`, or `[]` means **no filter** — every entity is exported (default). See [Filtering by SCOM Groups](#filtering-by-scom-groups). |
 | **Alert** | `Enabled` | Enable/disable alert collection |
 |  | `PollSeconds` | How often to query SCOM for alert changes (incremental on `LastModified`) |
 |  | `IncludeClosedAlerts` | Include closed alerts (ResolutionState=255) in queries |
+|  | `SqlTimeoutSeconds` | SQL command timeout for the alert query. Default `120`. The query reads the large `Context` column, which is disk bound on a cold SQL buffer cache. |
+|  | `BootstrapClosedAlertDays` | The first poll after startup only loads closed alerts modified within this many days (open alerts are always loaded). Default `1`. Later polls emit every closure. |
 |  | `AlloyEndpoint` | URL of Alloy's loki.source.api endpoint for pushing alerts |
 |  | `Groups` | Optional `string[]` of SCOM group display names to filter to. Omitted, `null`, or `[]` means **no filter** — every entity is exported (default). See [Filtering by SCOM Groups](#filtering-by-scom-groups). |
 
@@ -201,6 +204,40 @@ If every module's `Groups` is empty/omitted, the resolver does not run the SCOM 
 
 If multiple modules reference different groups, they are resolved together — one DB round-trip per refresh, regardless of how many modules use grouping.
 
+## Unit monitor state
+
+By default `/state` contains one series per entity (`scom_entity_health_state`, from the monitor `System.Health.EntityState`). Unit monitors have their own state rows (for example a service monitor with "Service is running" / "Service is not running") and are not part of that. They can be exported as a separate metric, selected by monitor name. The feature is **off by default**.
+
+```json
+"State": {
+  "Enabled": true,
+  "MonitorState": {
+    "Enabled": true,
+    "NamePatterns": [ "%snc_mid_%", "Veeam.%" ],
+    "MaxSeries": 5000
+  }
+}
+```
+
+| Setting | Description |
+|---|---|
+| `Enabled` | Default `false`. When `false` no extra query is run and `/state` is unchanged. |
+| `NamePatterns` | SQL `LIKE` patterns on the monitor name (`%` = any text, `_` = one character). A unit monitor is exported when its name matches **at least one** pattern. Enabled with no patterns exports nothing and logs a warning; use `"%"` to export every unit monitor. |
+| `MaxSeries` | Safety limit, default `5000`. If the patterns select more state rows than this, nothing is exported and a warning is logged. The count is made before the `Groups` filter. |
+
+The output (appended to `/state`):
+
+```
+scom_monitor_health_state{monitor_name="...",instance="server01",full_name="...",display_name="..."} 1
+```
+
+- Value `1` = Healthy, `2` = Warning, `3` = Critical. Rows with health state 0 (not initialised or not monitored) are not exported; a monitor that falls back to 0 disappears.
+- `instance` is the part of `full_name` after the last colon, like the `instance` label of the performance metrics (for an entity of a Windows computer class it is the server name).
+- Only unit monitors are exported (not aggregate or dependency monitors such as `System.Health.AvailabilityState`).
+- The `Groups` setting of the State module applies to the monitor state too.
+- Monitors that are deleted, or entities that are deleted, disappear at the next full reconcile (`FullReconcileMinutes`); the monitors matching the patterns are looked up again at each full reconcile.
+- Cost: the queries read `dbo.State` like the entity state does. In the environments measured (see `Benchmark/`) a pattern that selects a few monitors costs about 10 ms per query; all unit monitors with health state above 0 would be 3.4 times (Scania) to 1.8 times (a large environment) the number of series of the entity state, so keep the patterns narrow.
+
 ## Late-arriving performance samples
 
 A performance sample is stamped with the time the agent collected it (`TimeSampled`), but it only reaches the SCOM database after the agent batches it and a management server writes it — typically 30 seconds to a few minutes later, occasionally 10+ minutes. A poll that only asks for `TimeSampled` newer than the newest sample already seen silently skips every such row, and rarely collected counters (for example `% Free Space`) may then never be exported.
@@ -212,6 +249,17 @@ The Performance module avoids this in three ways:
 - **Seeding.** On startup (and when sources are added by a refresh) the latest sample per source within `SeedLookbackHours` is loaded, so hourly or daily counters do not have to wait for their next sample after a restart. The seed runs in two steps (see `SeedFastWindowMinutes`): the newest row per source from the last hour in one pass, then a lookup per source for the sources that had none; if the two-step seed fails the single-step seed is used. The log line `Seeded ...` reports the time of each step.
 
 The `scom_perf_late_rows_total` counter shows how many samples were accepted that a plain "newer than the newest seen" poll would have skipped. Set the log level to `Debug` to see per-poll row counts, the overlap in use and the seed results.
+
+#### Detecting a stalled data source
+
+Exported values stay on `/metrics` until `SeriesMaxAgeHours` expires them, so a SCOM database that has stopped receiving data (for example after the management group moved to another SQL server) looks healthy for days. Two gauges show this:
+
+| Metric | Meaning |
+|---|---|
+| `scom_perf_newest_sample_timestamp_seconds` | Unix time of the newest performance sample read from the database. `0` until the first sample is read. |
+| `scom_alert_last_successful_poll_timestamp_seconds` | Unix time of the last alert query that completed successfully. `0` until the first one. |
+
+Example alert expressions: `time() - scom_perf_newest_sample_timestamp_seconds > 1800` (no new performance data for 30 minutes) and `time() - scom_alert_last_successful_poll_timestamp_seconds > 300` (alert queries failing). Choose the performance threshold well above your slowest collection interval.
 
 ## Stale series and metadata refresh
 
@@ -292,7 +340,8 @@ Each pushed (and `/alerts`-served) alert includes:
 
 The alert exporter only fetches and emits **changes**:
 - The SQL query is incremental on `LastModified` — at each tick only rows whose `LastModified` has advanced since the previous tick are fetched.
-- The first poll after startup loads all currently-open alerts as the bootstrap snapshot, then the exporter stays incremental until restart.
+- The first poll after startup loads all currently-open alerts as the bootstrap snapshot (plus closed alerts from the last `BootstrapClosedAlertDays` days when `IncludeClosedAlerts = true`), then the exporter stays incremental until restart.
+- If the query fails (e.g. SQL timeout), the exporter backs off (doubling `PollSeconds`, capped at 300 s) and retries; the bootstrap is repeated until it succeeds.
 - When an alert closes, its `LastModified` advances and it is emitted exactly once with `resolution_state = 255` (provided `IncludeClosedAlerts = true`; otherwise closures are suppressed).
 - The push and the `/alerts` debug endpoint share the same delta — both reflect the latest poll's changed alerts.
 

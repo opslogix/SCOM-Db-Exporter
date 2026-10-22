@@ -95,6 +95,10 @@ namespace ScomDbExporter.Modules
             "scom_perf_late_rows_total",
             "Samples accepted that were older than the newest sample already seen (skipped by a poll without overlap)");
 
+        private static readonly Gauge NewestSample = Metrics.CreateGauge(
+            "scom_perf_newest_sample_timestamp_seconds",
+            "Unix time (seconds) of the newest performance sample read from the SCOM database; 0 until the first sample is read");
+
         public PerformanceExporter(
             string connString,
             ModuleToggle settings,
@@ -596,7 +600,7 @@ namespace ScomDbExporter.Modules
             return true;
         }
 
-        private static string ExtractInstanceName(string fullName)
+        internal static string ExtractInstanceName(string fullName)
         {
             if (string.IsNullOrWhiteSpace(fullName))
                 return "";
@@ -690,6 +694,7 @@ WHERE TimeSampled > @LastSync
         {
             int accepted = 0;
             int late = 0;
+            DateTime newest = DateTime.MinValue;
 
             foreach (var (sourceId, val, ts) in rows)
             {
@@ -717,12 +722,21 @@ WHERE TimeSampled > @LastSync
                     };
 
                     accepted++;
+                    if (ts > newest)
+                        newest = ts;
                     if (countLate && ts <= watermark)
                         late++;
                 }
 
                 if (ts > _lastSyncTime)
                     _lastSyncTime = ts;
+            }
+
+            if (newest > DateTime.MinValue)
+            {
+                long unix = new DateTimeOffset(DateTime.SpecifyKind(newest, DateTimeKind.Utc)).ToUnixTimeSeconds();
+                if (unix > NewestSample.Value)
+                    NewestSample.Set(unix);
             }
 
             if (late > 0)
