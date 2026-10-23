@@ -22,7 +22,9 @@ internal static class Program
         Log.Logger = new LoggerConfiguration()
             .ReadFrom.Configuration(configuration)
             .WriteTo.Console(outputTemplate:
-                "{Timestamp:HH:mm:ss} [{Level:u3}] [{SourceContext}] {Message:lj}{NewLine}{Exception}")
+                "{Timestamp:HH:mm:ss} [{Level:u3}] [{SourceContext}] " +
+                LogPrefix.ForTemplate(configuration["InstanceName"]) +
+                "{Message:lj}{NewLine}{Exception}")
             .CreateLogger();
 
         try

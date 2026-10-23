@@ -3,9 +3,31 @@ namespace ScomDbExporter.Config
     public class AppConfig
     {
         public string ConnectionString { get; set; }
+
+        // Optional label for this instance (e.g. the AP number in the service name).
+        // Shown as a "[label] " prefix on every log message so that events from
+        // several instances in the same Windows Application log can be told apart.
+        public string InstanceName { get; set; }
+
         public HttpConfig Http { get; set; } = new HttpConfig();
         public ModuleConfig Modules { get; set; } = new ModuleConfig();
         public GroupResolverConfig GroupResolver { get; set; } = new GroupResolverConfig();
+    }
+
+    public static class LogPrefix
+    {
+        /// <summary>
+        /// "[name] " for an instance name, or "" when it is empty. Braces are doubled
+        /// so the result can be put in front of a Serilog output template.
+        /// </summary>
+        public static string ForTemplate(string instanceName)
+        {
+            if (string.IsNullOrWhiteSpace(instanceName))
+                return "";
+
+            string name = instanceName.Trim().Replace("{", "{{").Replace("}", "}}");
+            return "[" + name + "] ";
+        }
     }
 
     public class HttpConfig

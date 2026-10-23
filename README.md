@@ -22,6 +22,7 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
 ```json
 {
   "ConnectionString": "Data Source=your-sql-server;Initial Catalog=OperationsManager;Integrated Security=True;",
+  "InstanceName": "",
   "Serilog": {
     "MinimumLevel": {
       "Default": "Information",
@@ -68,6 +69,7 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
 | Setting | Description |
 |---------|-------------|
 | `ConnectionString` | SQL Server connection string pointing to your OperationsManager database |
+| `InstanceName` | Optional label for this instance, e.g. the AP number of the service. When set, every log message gets a `[label] ` prefix (Event Log and console), so events from several instances on the same server can be told apart. Empty or omitted: no prefix. |
 | `Http.Host` | Host binding (use `localhost` for local only, or `+` for all interfaces) |
 | `Http.Port` | Port number for all HTTP endpoints (default: 9464) |
 
@@ -143,6 +145,10 @@ Both executables use [Serilog](https://serilog.net/) configured via the `Serilog
 | `ScomDbExporter.Service.exe` | Windows Event Log | **Application** log, source `ScomDbExporter` |
 
 The Service writes to the existing Windows **Application** log — no new log is created. The first time the service starts it registers its event source (`ScomDbExporter`) automatically; this requires the service account to have administrator rights on first launch only.
+
+### Telling instances apart
+
+All instances on a server write to the same Application log with the same source (`ScomDbExporter`). Set `InstanceName` in each instance's `appsettings.json` (for example `"InstanceName": "AP1141001"`) and its messages start with `[AP1141001]`, e.g. `[AP1141001] Slow SQL query: poll took 7.8s (375 rows)`. The Event ID is not affected, so filters on Event ID keep working.
 
 ### Changing the log level
 

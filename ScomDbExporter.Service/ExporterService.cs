@@ -35,7 +35,9 @@ namespace ScomDbExporter.Service
                 .WriteTo.EventLog(
                     source: "ScomDbExporter",
                     logName: "Application",
-                    manageEventSource: true)
+                    manageEventSource: true,
+                    outputTemplate: LogPrefix.ForTemplate(configuration["InstanceName"]) +
+                        "{Message:lj}{NewLine}{Exception}")
                 .CreateLogger();
 
             _loggerFactory = LoggerFactory.Create(builder =>
