@@ -61,6 +61,12 @@ namespace ScomDbExporter.Config
         // into queries of at most this many ids. Lower it if error 8623 persists.
         public int SourceChunkSize { get; set; } = 100;
 
+        // Metrics module: with a group filter, the performance queries are scoped to
+        // the group's performance sources as long as there are at most this many (in
+        // queries of SourceChunkSize ids each). With more, or none, the queries are
+        // not scoped and read the whole SCOM database, which is slower.
+        public int MaxFilteredSources { get; set; } = 5000;
+
         // Metrics module: a series whose newest sample is older than this is removed
         // from the output (a rule that was disabled, or a source that stopped
         // reporting, would otherwise export its last value forever). Must be longer
