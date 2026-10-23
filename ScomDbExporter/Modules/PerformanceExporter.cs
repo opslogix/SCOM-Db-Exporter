@@ -679,7 +679,7 @@ WHERE TimeSampled > @LastSync
 
             SqlQueryDuration.WithLabels("poll").Observe(sw.Elapsed.TotalSeconds);
 
-            if (sw.Elapsed.TotalSeconds > 5.0)
+            if (_settings.SlowPollWarnSeconds > 0 && sw.Elapsed.TotalSeconds > _settings.SlowPollWarnSeconds)
                 _log.LogWarning(
                     "Slow SQL query: poll took {ElapsedSeconds:F1}s ({RowCount} rows)",
                     sw.Elapsed.TotalSeconds, rawRows.Count);
