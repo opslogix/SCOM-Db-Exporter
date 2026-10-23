@@ -25,9 +25,10 @@ namespace ScomDbExporter.Modules
         private DateTime _nextMetadataRefreshUtc = DateTime.MaxValue;
         private DateTime _lastSyncTime = DateTime.UtcNow.AddMinutes(-5);
 
-        // Above this many group-scoped sources the IN (...) list is not worth its
-        // parse cost; fall back to the unfiltered query with a sparser catch-up.
-        private const int MaxFilteredSources = 2000;
+        // Above this many group-scoped sources the queries are not scoped any more:
+        // fall back to the unfiltered query with a sparser catch-up. Configurable
+        // (MaxFilteredSources); the id list is split into chunks (see ChunkIds).
+        private int MaxFilteredSources => Math.Max(1, _settings.MaxFilteredSources);
 
         // PerformanceSourceInternalIds of the group-filtered sources, or null when the
         // query is not source-scoped. Built from _perfSources, so it is rebuilt after
@@ -37,6 +38,10 @@ namespace ScomDbExporter.Modules
         private DateTime _filterResolverStampUtc = DateTime.MinValue;
         private DateTime _nextCatchUpUtc = DateTime.MinValue;
         private bool _seededUnfiltered;
+
+        // Outcome of the last RebuildSourceFilter, so a refresh that changes nothing
+        // does not log the same warning every RefreshMinutes.
+        private string _lastFilterState;
 
         // -------------------------------
         // INSTANCE STATE (NO STATICS)
@@ -806,18 +811,24 @@ WHERE TimeSampled > @LastSync
 
             if (ids.Count == 0 || ids.Count > MaxFilteredSources)
             {
-                _log.LogWarning(
+                string state = ids.Count == 0 ? "empty" : "too-many";
+                _log.Log(
+                    state == _lastFilterState ? LogLevel.Debug : LogLevel.Warning,
                     "Performance queries not scoped to group sources ({Count} sources, allowed 1-{Max}); querying the whole SCOM database",
                     ids.Count, MaxFilteredSources);
+                _lastFilterState = state;
                 return;
             }
 
             ids.Sort();
             _sourceIds = ids.ToArray();
 
-            _log.LogInformation(
+            string scoped = "scoped:" + _sourceIds.Length;
+            _log.Log(
+                scoped == _lastFilterState ? LogLevel.Debug : LogLevel.Information,
                 "Performance queries scoped to {Count} performance sources of the configured groups ({Chunks} queries of at most {ChunkSize} ids)",
                 _sourceIds.Length, ChunkIds(_sourceIds).Count, ChunkSize);
+            _lastFilterState = scoped;
         }
 
         /// <summary>
