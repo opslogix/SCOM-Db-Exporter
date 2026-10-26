@@ -89,6 +89,12 @@ namespace ScomDbExporter.Config
         // not scoped and read the whole SCOM database, which is slower.
         public int MaxFilteredSources { get; set; } = 5000;
 
+        // Metrics module: a poll that takes longer than this many seconds logs the
+        // warning "Slow SQL query: poll took ...". The poll runs several queries when a
+        // group filter is set, and an occasional poll of 5 - 8 s (plan compile, load
+        // on the SQL Server) is harmless. 0 = never warn.
+        public double SlowPollWarnSeconds { get; set; } = 10;
+
         // Metrics module: a series whose newest sample is older than this is removed
         // from the output (a rule that was disabled, or a source that stopped
         // reporting, would otherwise export its last value forever). Must be longer
