@@ -156,5 +156,12 @@ namespace ScomDbExporter.Config
         // Typical use: filter by a "Servers" group and pick up CPU/Disk/Process child
         // entities hosted by those servers.
         public bool IncludeHostedChildren { get; set; } = true;
+
+        // Relationship type names (dbo.RelationshipType.RelationshipTypeName) to follow
+        // from each direct group member. The targets count as members too (and, with
+        // IncludeHostedChildren, so do the entities they host). For objects that are
+        // contained rather than hosted, e.g. Windows Computer -> SQL DB Engine
+        // ("Microsoft.SQLServer.Windows.ServerComputerContainsDBEngine"). Empty = off.
+        public string[] FollowRelationshipTypes { get; set; } = System.Array.Empty<string>();
     }
 }

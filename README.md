@@ -81,6 +81,7 @@ The `GroupResolver` block controls how SCOM group memberships are resolved when 
 |---------|---------|-------------|
 | `GroupResolver.RefreshMinutes` | `15` | How often to re-resolve group membership against the SCOM DB. This is the only periodic group-related query — keep it relatively rare. |
 | `GroupResolver.IncludeHostedChildren` | `true` | When `true`, automatically includes every entity whose `TopLevelHostEntity` is a group member. Lets a `Servers` group also match each server's CPU/disk/process child entities. |
+| `GroupResolver.FollowRelationshipTypes` | `[]` | Relationship type names to follow from each group member. The targets are treated as members too, and with `IncludeHostedChildren` so are the entities they host. Needed for objects that are *contained* in the server rather than hosted by it. See [Contained objects (SQL Server)](#contained-objects-sql-server). |
 
 ### Module Settings
 
@@ -212,6 +213,25 @@ If every module's `Groups` is empty/omitted, the resolver does not run the SCOM 
 - **Nested groups are not transitively expanded** — only direct members of the named groups (plus their hosted children) are included. If you have a parent group whose only members are other groups, list the child groups explicitly in `Groups`.
 
 If multiple modules reference different groups, they are resolved together — one DB round-trip per refresh, regardless of how many modules use grouping.
+
+### Contained objects (SQL Server)
+
+`IncludeHostedChildren` only follows hosting (`TopLevelHostEntityId`). The SQL Server management pack connects a Windows Computer to its DB Engine with a *containment* relationship (`Microsoft.SQLServer.Windows.ServerComputerContainsDBEngine`), and the DB Engine is its own top-level host (`Path` is `NULL`). A group that contains only the Windows Computer therefore yields no databases, SQL Agent jobs or resource pools.
+
+Name the relationship types to follow, and a group of servers is enough:
+
+```json
+"GroupResolver": {
+  "FollowRelationshipTypes": [
+    "Microsoft.SQLServer.Windows.ServerComputerContainsDBEngine",
+    "Microsoft.SQLServer.IntegrationServices.Relationship.ServerComputerContainsISInstance"
+  ]
+}
+```
+
+- Only the listed types are followed, and only one step from a direct group member. The entities they host are then included as usual.
+- Find candidate type names with `SELECT RelationshipTypeName FROM dbo.RelationshipType WHERE RelationshipTypeName LIKE '%ComputerContains%'`, or look at the relationships of the missing object in `dbo.Relationship`.
+- The list is empty by default, which leaves the behaviour unchanged. A SCOM group that contains the DB Engine instances (dynamic group) is an alternative that needs no setting.
 
 ## Unit monitor state
 
