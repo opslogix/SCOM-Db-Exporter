@@ -69,6 +69,8 @@ namespace ScomDbExporter.Http
                 sb.Append("{");
                 sb.Append("display_name=\"").Append(Escape(e.DisplayName)).Append("\",");
                 sb.Append("full_name=\"").Append(Escape(e.FullName)).Append("\"");
+                if (_state.IncludeManagementPack)
+                    sb.Append(",mp=\"").Append(Escape(e.ManagementPack)).Append("\"");
                 sb.Append("} ");
                 sb.Append(e.HealthState);
                 sb.Append("\n");
@@ -87,6 +89,8 @@ namespace ScomDbExporter.Http
                     sb.Append("instance=\"").Append(Escape(PerformanceExporter.ExtractInstanceName(m.FullName))).Append("\",");
                     sb.Append("full_name=\"").Append(Escape(m.FullName)).Append("\",");
                     sb.Append("display_name=\"").Append(Escape(m.DisplayName)).Append("\"");
+                    if (_state.IncludeManagementPack)
+                        sb.Append(",mp=\"").Append(Escape(m.ManagementPack)).Append("\"");
                     sb.Append("} ");
                     sb.Append(m.HealthState);
                     sb.Append("\n");

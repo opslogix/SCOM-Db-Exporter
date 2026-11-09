@@ -44,6 +44,7 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
 {
   "ConnectionString": "Data Source=your-sql-server;Initial Catalog=OperationsManager;Integrated Security=True;",
   "InstanceName": "",
+  "IncludeManagementPack": false,
   "Serilog": {
     "MinimumLevel": {
       "Default": "Information",
@@ -91,6 +92,7 @@ To configure the exporter, edit the `appsettings.json` file included in the pack
 |---------|-------------|
 | `ConnectionString` | SQL Server connection string pointing to your OperationsManager database |
 | `InstanceName` | Optional label for this instance, e.g. the AP number of the service. When set, every log message gets a `[label] ` prefix (Event Log and console), so events from several instances on the same server can be told apart. Empty or omitted: no prefix. |
+| `IncludeManagementPack` | Adds the name of the management pack as an `mp` label: on every performance metric (including `scom_raw_value`) and on `scom_entity_health_state` / `scom_monitor_health_state` in `/state`. **Off by default.** See [Management pack label](#management-pack-label). |
 | `Http.Host` | Host binding (use `localhost` for local only, or `+` for all interfaces) |
 | `Http.Port` | Port number for all HTTP endpoints (default: 9464) |
 
@@ -287,6 +289,20 @@ scom_monitor_health_state{monitor_name="...",instance="server01",full_name="..."
 - The `Groups` setting of the State module applies to the monitor state too.
 - Monitors that are deleted, or entities that are deleted, disappear at the next full reconcile (`FullReconcileMinutes`); the monitors matching the patterns are looked up again at each full reconcile.
 - Cost: the queries read `dbo.State` like the entity state does. In the environments we measured, a pattern that selects a few monitors costs about 10 ms per query. Exporting every unit monitor with a health state above 0 would produce 1.8 to 3.4 times as many series as the entity state, so keep the patterns narrow.
+
+## Management pack label
+
+With `"IncludeManagementPack": true` the exporter adds an `mp` label holding the name of a management pack, so dashboards and Alloy rules can filter on it. The names are read once at start-up and on every metadata refresh (performance) or full reconcile (state), so polling costs nothing extra.
+
+| Series | `mp` is the management pack of... |
+|--------|-----------------------------------|
+| Performance metrics and `scom_raw_value` | the **rule** that collects the counter (usually a `...Monitoring` MP, or a custom MP) |
+| `scom_monitor_health_state` | the **monitor** |
+| `scom_entity_health_state` | the entity's **class** (usually a `...Discovery` or `...Library` MP) |
+
+Because of this the same product can show different values for performance and state (for example `Microsoft.SQLServer.Windows.Monitoring` vs `Microsoft.SQLServer.Windows.Discovery`). Normalise the name in Alloy if you want one value, e.g. strip the `.Discovery`, `.Monitoring` and `.Library` suffix. The value is empty when the MP cannot be resolved.
+
+The label adds a dimension to every series, so only the series count changes where one counter is collected by rules from several management packs. Turning the setting on or off changes the label set of the metrics: update dashboards and Alloy rules together with the exporter.
 
 ## Late-arriving performance samples
 

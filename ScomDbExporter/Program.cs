@@ -56,7 +56,8 @@ namespace ScomDbExporter.Core
                 _config.ConnectionString,
                 _config.Modules.Metrics,
                 _resolver,
-                _loggerFactory.CreateLogger<PerformanceExporter>());
+                _loggerFactory.CreateLogger<PerformanceExporter>(),
+                _config.IncludeManagementPack);
 
             if (perf.Enabled)
             {
@@ -71,7 +72,8 @@ namespace ScomDbExporter.Core
                 _config.ConnectionString,
                 _config.Modules.State,
                 _resolver,
-                _loggerFactory.CreateLogger<StateExporter>());
+                _loggerFactory.CreateLogger<StateExporter>(),
+                _config.IncludeManagementPack);
 
             if (state.Enabled)
             {

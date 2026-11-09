@@ -20,6 +20,8 @@ namespace ScomDbExporter.Modules
         private readonly ModuleToggle _settings;
         private readonly GroupMembershipResolver _resolver;
         private readonly ILogger<PerformanceExporter> _log;
+        private readonly bool _includeMp;
+        private const string MpLabel = "mp";
 
         private DateTime _nextRunUtc = DateTime.MinValue;
         private DateTime _nextMetadataRefreshUtc = DateTime.MaxValue;
@@ -53,6 +55,7 @@ namespace ScomDbExporter.Modules
         private Dictionary<Guid, CounterInfo> _counters = new();
         private Dictionary<Guid, EntityInfo> _entities = new();
         private Dictionary<int, PerfSourceInfo> _perfSources = new();
+        private Dictionary<Guid, string> _ruleMps = new();   // RuleId -> management pack name (IncludeManagementPack only)
 
         // A failed metadata refresh is retried after this delay instead of on every tick.
         private static readonly TimeSpan MetadataRetryDelay = TimeSpan.FromMinutes(1);
@@ -79,13 +82,7 @@ namespace ScomDbExporter.Modules
         private readonly List<(string TypeName, string ObjPrefix, string CounterKey, MappingEntry Entry)> _classWildcardEntries = new();
         private readonly Dictionary<string, MetricDefinition> _metricDefs = new(StringComparer.OrdinalIgnoreCase);
 
-        private static readonly Gauge RawGauge = Metrics.CreateGauge(
-            "scom_raw_value",
-            "Unmapped SCOM performance values",
-            new GaugeConfiguration
-            {
-                LabelNames = new[] { "object", "counter", "entity", "instance", "instance_name", "entity_class" }
-            });
+        private readonly Gauge _rawGauge;
 
         private static readonly Histogram SqlQueryDuration = Metrics.CreateHistogram(
             "scom_sql_query_duration_seconds",
@@ -108,7 +105,8 @@ namespace ScomDbExporter.Modules
             string connString,
             ModuleToggle settings,
             GroupMembershipResolver resolver,
-            ILogger<PerformanceExporter> log)
+            ILogger<PerformanceExporter> log,
+            bool includeManagementPack = false)
         {
             if (string.IsNullOrWhiteSpace(connString))
                 throw new ArgumentException("Connection string is null or empty", nameof(connString));
@@ -117,6 +115,16 @@ namespace ScomDbExporter.Modules
             _settings = settings ?? new ModuleToggle();
             _resolver = resolver;
             _log = log;
+            _includeMp = includeManagementPack;
+
+            var rawLabels = new List<string> { "object", "counter", "entity", "instance", "instance_name", "entity_class" };
+            if (_includeMp)
+                rawLabels.Add(MpLabel);
+
+            _rawGauge = Metrics.CreateGauge(
+                "scom_raw_value",
+                "Unmapped SCOM performance values",
+                new GaugeConfiguration { LabelNames = rawLabels.ToArray() });
         }
 
         public void Init()
@@ -126,6 +134,8 @@ namespace ScomDbExporter.Modules
             LoadCounters(_counters);
             LoadEntities(_entities, _managedTypes);
             LoadPerfSources(_perfSources);
+            if (_includeMp)
+                LoadRuleMps(_ruleMps);
 
             RebuildSourceFilter();
             SeedLatest();
@@ -187,6 +197,7 @@ namespace ScomDbExporter.Modules
             var counters = new Dictionary<Guid, CounterInfo>();
             var entities = new Dictionary<Guid, EntityInfo>();
             var sources = new Dictionary<int, PerfSourceInfo>();
+            var ruleMps = new Dictionary<Guid, string>();
 
             try
             {
@@ -194,6 +205,8 @@ namespace ScomDbExporter.Modules
                 LoadCounters(counters);
                 LoadEntities(entities, types);
                 LoadPerfSources(sources);
+                if (_includeMp)
+                    LoadRuleMps(ruleMps);
             }
             catch (Exception ex)
             {
@@ -207,6 +220,7 @@ namespace ScomDbExporter.Modules
             _counters = counters;
             _entities = entities;
             _perfSources = sources;
+            _ruleMps = ruleMps;
 
             RebuildSourceFilter();
             SeedLatest();
@@ -304,6 +318,9 @@ namespace ScomDbExporter.Modules
 
             foreach (var kv in metricLabelSets)
             {
+                if (_includeMp)
+                    kv.Value.Add(MpLabel);
+
                 var gauge = Metrics.CreateGauge(
                     kv.Key,
                     "Mapped SCOM metric",
@@ -475,6 +492,7 @@ namespace ScomDbExporter.Modules
                 Gauge gauge;
                 string[] labels;
                 double value;
+                string mp = _includeMp ? ResolveMp(sourceId) : "";
 
                 if (TryGetMapping(s.Counter.ObjectName, s.Counter.CounterName, s.InstanceName, s.Entity?.TypeName, out var map, out var matchedPrefix) &&
                     _metricDefs.TryGetValue(map.MetricName, out var def))
@@ -495,6 +513,7 @@ namespace ScomDbExporter.Modules
                     {
                         var label = def.LabelNames[i];
                         labels[i] =
+                            _includeMp && label == MpLabel ? mp :
                             map.Labels != null && map.Labels.TryGetValue(label, out var tpl)
                                 ? tpl == "{instance}" ? ExtractInstanceName(s.Entity.FullName)
                                 : tpl == "{entity}" ? s.Entity.DisplayName
@@ -508,8 +527,8 @@ namespace ScomDbExporter.Modules
                 else
                 {
                     value = s.Value;
-                    gauge = RawGauge;
-                    labels = new[]
+                    gauge = _rawGauge;
+                    var raw = new List<string>
                     {
                         s.Counter.ObjectName ?? "",
                         s.Counter.CounterName ?? "",
@@ -518,6 +537,9 @@ namespace ScomDbExporter.Modules
                         s.InstanceName ?? "",
                         s.Entity?.TypeName ?? ""
                     };
+                    if (_includeMp)
+                        raw.Add(mp);
+                    labels = raw.ToArray();
                 }
 
                 gauge.WithLabels(labels).Set(value);
@@ -554,6 +576,13 @@ namespace ScomDbExporter.Modules
             if (filter != null && skipped > 0)
                 _log.LogTrace("Group filter skipped {Skipped} samples", skipped);
         }
+
+        // Management pack of the rule that collects this source ("" when unknown).
+        private string ResolveMp(int sourceId)
+            => _perfSources.TryGetValue(sourceId, out var src) &&
+               _ruleMps.TryGetValue(src.RuleId, out var name)
+                ? name
+                : "";
 
         private bool EntityExists(Guid entityId)
             => _entities.TryGetValue(entityId, out var e) && !e.Missing;
@@ -1180,7 +1209,7 @@ WHERE IsDeleted = 0";
         private void LoadPerfSources(Dictionary<int, PerfSourceInfo> target)
         {
             const string sql = @"
-SELECT PerformanceSourceInternalId, BaseManagedEntityId, PerformanceCounterId, PerfmonInstanceName
+SELECT PerformanceSourceInternalId, BaseManagedEntityId, PerformanceCounterId, PerfmonInstanceName, RuleId
 FROM dbo.PerformanceSource WITH (NOLOCK)";
 
             var sw = Stopwatch.StartNew();
@@ -1195,7 +1224,8 @@ FROM dbo.PerformanceSource WITH (NOLOCK)";
                 {
                     EntityId     = r.GetGuid(1),
                     CounterId    = r.GetGuid(2),
-                    InstanceName = r.IsDBNull(3) ? "" : r.GetString(3)
+                    InstanceName = r.IsDBNull(3) ? "" : r.GetString(3),
+                    RuleId       = r.IsDBNull(4) ? Guid.Empty : r.GetGuid(4)
                 };
             }
 
@@ -1208,10 +1238,42 @@ FROM dbo.PerformanceSource WITH (NOLOCK)";
                     sw.Elapsed.TotalSeconds, target.Count);
         }
 
+        // RuleId -> name of the management pack that holds the rule. Loaded together with
+        // the other metadata caches, so it costs nothing per poll. (Rules is the table name;
+        // "Rule" is a reserved word.)
+        private void LoadRuleMps(Dictionary<Guid, string> target)
+        {
+            const string sql = @"
+SELECT r.RuleId, mp.MPName
+FROM dbo.[Rules] r WITH (NOLOCK)
+JOIN dbo.ManagementPack mp WITH (NOLOCK)
+    ON r.ManagementPackId = mp.ManagementPackId";
+
+            var sw = Stopwatch.StartNew();
+
+            using var conn = new SqlConnection(_connString);
+            using var cmd = new SqlCommand(sql, conn);
+            conn.Open();
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (!r.IsDBNull(0) && !r.IsDBNull(1))
+                    target[r.GetGuid(0)] = r.GetString(1);
+            }
+
+            sw.Stop();
+            SqlQueryDuration.WithLabels("load_rule_mps").Observe(sw.Elapsed.TotalSeconds);
+
+            if (sw.Elapsed.TotalSeconds > 10.0)
+                _log.LogWarning(
+                    "Slow SQL query: load_rule_mps took {ElapsedSeconds:F1}s ({Count} rows)",
+                    sw.Elapsed.TotalSeconds, target.Count);
+        }
+
         private PerfSourceInfo LoadPerfSourceOnDemand(int sourceId)
         {
             const string sql = @"
-SELECT PerformanceSourceInternalId, BaseManagedEntityId, PerformanceCounterId, PerfmonInstanceName
+SELECT PerformanceSourceInternalId, BaseManagedEntityId, PerformanceCounterId, PerfmonInstanceName, RuleId
 FROM dbo.PerformanceSource
 WHERE PerformanceSourceInternalId = @id";
 
@@ -1230,7 +1292,8 @@ WHERE PerformanceSourceInternalId = @id";
                 {
                     EntityId     = r.GetGuid(1),
                     CounterId    = r.GetGuid(2),
-                    InstanceName = r.IsDBNull(3) ? "" : r.GetString(3)
+                    InstanceName = r.IsDBNull(3) ? "" : r.GetString(3),
+                    RuleId       = r.IsDBNull(4) ? Guid.Empty : r.GetGuid(4)
                 };
             }
             else

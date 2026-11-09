@@ -18,6 +18,7 @@ namespace ScomDbExporter.Modules
         private readonly StateModuleToggle _settings;
         private readonly GroupMembershipResolver _resolver;
         private readonly ILogger<StateExporter> _log;
+        private readonly bool _includeMp;
 
         // SQL datetime floor is 1753-01-01; keep the incremental sentinel above it.
         private static readonly DateTime SqlSafeMin = new DateTime(1900, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -33,9 +34,16 @@ namespace ScomDbExporter.Modules
         // Unit monitor state (optional, see MonitorStateConfig). Keyed by (entity, monitor).
         private Dictionary<(Guid Entity, Guid Monitor), MonitorStateDto> _monitorStates = new();
         private Dictionary<Guid, string> _monitorNames = new();
+        private Dictionary<Guid, string> _monitorMps = new();   // MonitorId -> management pack name
+
+        // ManagedTypeId -> name of the management pack that defines the class. Replaced as a
+        // whole on every full reconcile; only filled when IncludeManagementPack is on.
+        private Dictionary<Guid, string> _typeMps = new();
         private DateTime _monitorLastSync = SqlSafeMin;
 
         private MonitorStateConfig MonitorSettings => _settings.MonitorState;
+
+        public bool IncludeManagementPack => _includeMp;
 
         public bool MonitorStateEnabled
             => MonitorSettings != null && MonitorSettings.Enabled;
@@ -84,17 +92,20 @@ namespace ScomDbExporter.Modules
             string connString,
             StateModuleToggle settings,
             GroupMembershipResolver resolver,
-            ILogger<StateExporter> log)
+            ILogger<StateExporter> log,
+            bool includeManagementPack = false)
         {
             _connString = connString;
             _settings = settings ?? new StateModuleToggle();
             _resolver = resolver;
             _log = log;
+            _includeMp = includeManagementPack;
         }
 
         public void Init()
         {
             _entityStateMonitorId = LoadEntityStateMonitorId();
+            RefreshTypeMps();
             FullReconcile();
             _nextFullReconcileUtc = DateTime.UtcNow.AddMinutes(
                 Math.Max(1, _settings.FullReconcileMinutes));
@@ -128,6 +139,7 @@ namespace ScomDbExporter.Modules
 
             if (DateTime.UtcNow >= _nextFullReconcileUtc)
             {
+                RefreshTypeMps();
                 FullReconcile();
                 if (monitors)
                     MonitorFullReconcile();
@@ -165,20 +177,24 @@ namespace ScomDbExporter.Modules
         /// Resolves the unit monitors whose name matches a pattern. Returns null when the
         /// query fails, so the caller keeps the previous snapshot.
         /// </summary>
-        private Dictionary<Guid, string> ResolveMonitors()
+        private Dictionary<Guid, string> ResolveMonitors(out Dictionary<Guid, string> monitorMps)
         {
             var patterns = GetPatterns();
-            var sql = new StringBuilder(
-                "SELECT MonitorId, MonitorName FROM dbo.Monitor WITH (NOLOCK) WHERE IsUnitMonitor = 1 AND (");
+            var sql = new StringBuilder(_includeMp
+                ? "SELECT m.MonitorId, m.MonitorName, mp.MPName FROM dbo.Monitor m WITH (NOLOCK) " +
+                  "LEFT JOIN dbo.ManagementPack mp WITH (NOLOCK) ON m.ManagementPackId = mp.ManagementPackId " +
+                  "WHERE m.IsUnitMonitor = 1 AND ("
+                : "SELECT m.MonitorId, m.MonitorName FROM dbo.Monitor m WITH (NOLOCK) WHERE m.IsUnitMonitor = 1 AND (");
             for (int i = 0; i < patterns.Count; i++)
             {
                 if (i > 0)
                     sql.Append(" OR ");
-                sql.Append("MonitorName LIKE @p").Append(i);
+                sql.Append("m.MonitorName LIKE @p").Append(i);
             }
             sql.Append(");");
 
             var result = new Dictionary<Guid, string>();
+            monitorMps = new Dictionary<Guid, string>();
             try
             {
                 using var conn = new SqlConnection(_connString);
@@ -189,7 +205,11 @@ namespace ScomDbExporter.Modules
                 conn.Open();
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
+                {
                     result[r.GetGuid(0)] = r.IsDBNull(1) ? "" : r.GetString(1);
+                    if (_includeMp)
+                        monitorMps[r.GetGuid(0)] = r.IsDBNull(2) ? "" : r.GetString(2);
+                }
             }
             catch (SqlException ex)
             {
@@ -217,7 +237,7 @@ namespace ScomDbExporter.Modules
         {
             var sw = Stopwatch.StartNew();
 
-            var names = ResolveMonitors();
+            var names = ResolveMonitors(out var monitorMps);
             if (names == null)
                 return;
 
@@ -253,7 +273,7 @@ WHERE s.MonitorId IN (" + BuildIdList(names.Keys) + @")
 
                     while (r.Read())
                     {
-                        var dto = ReadMonitorRow(r, names, out var lastMod);
+                        var dto = ReadMonitorRow(r, names, monitorMps, out var lastMod);
                         states[(dto.BaseManagedEntityId, dto.MonitorId)] = dto;
                         if (lastMod > maxLastMod)
                             maxLastMod = lastMod;
@@ -292,6 +312,7 @@ WHERE s.MonitorId IN (" + BuildIdList(names.Keys) + @")
 
                 _monitorStates = states;
                 _monitorNames = names;
+                _monitorMps = monitorMps;
                 if (maxLastMod > _monitorLastSync)
                     _monitorLastSync = maxLastMod;
             }
@@ -304,8 +325,12 @@ WHERE s.MonitorId IN (" + BuildIdList(names.Keys) + @")
         private void MonitorIncrementalRefresh()
         {
             Dictionary<Guid, string> names;
+            Dictionary<Guid, string> mps;
             lock (_lock)
+            {
                 names = _monitorNames;
+                mps = _monitorMps;
+            }
 
             if (names.Count == 0)
                 return;
@@ -341,7 +366,7 @@ WHERE s.MonitorId IN (" + BuildIdList(names.Keys) + @")
 
                 while (r.Read())
                 {
-                    var dto = ReadMonitorRow(r, names, out var lastMod);
+                    var dto = ReadMonitorRow(r, names, mps, out var lastMod);
                     changes.Add(dto);
                     if (lastMod > maxLastMod)
                         maxLastMod = lastMod;
@@ -390,7 +415,7 @@ WHERE s.MonitorId IN (" + BuildIdList(names.Keys) + @")
         }
 
         private static MonitorStateDto ReadMonitorRow(
-            SqlDataReader r, Dictionary<Guid, string> names, out DateTime lastModified)
+            SqlDataReader r, Dictionary<Guid, string> names, Dictionary<Guid, string> mps, out DateTime lastModified)
         {
             var monitorId = r.GetGuid(1);
             lastModified = r.IsDBNull(5) ? DateTime.MinValue : r.GetDateTime(5);
@@ -400,6 +425,7 @@ WHERE s.MonitorId IN (" + BuildIdList(names.Keys) + @")
                 BaseManagedEntityId = r.GetGuid(0),
                 MonitorId = monitorId,
                 MonitorName = names.TryGetValue(monitorId, out var n) ? n : "",
+                ManagementPack = mps != null && mps.TryGetValue(monitorId, out var mpName) ? mpName : "",
                 DisplayName = r.IsDBNull(2) ? "" : r.GetString(2),
                 FullName = r.IsDBNull(3) ? "" : r.GetString(3),
                 HealthState = r.IsDBNull(4) ? 0 : Convert.ToInt32(r.GetValue(4))
@@ -414,7 +440,8 @@ SELECT
     bme.DisplayName,
     bme.FullName,
     s.HealthState,
-    s.LastModified
+    s.LastModified,
+    bme.BaseManagedTypeId
 FROM dbo.State s WITH (NOLOCK)
 JOIN dbo.BaseManagedEntity bme WITH (NOLOCK)
     ON s.BaseManagedEntityId = bme.BaseManagedEntityId
@@ -478,7 +505,8 @@ SELECT
     bme.DisplayName,
     bme.FullName,
     s.HealthState,
-    s.LastModified
+    s.LastModified,
+    bme.BaseManagedTypeId
 FROM dbo.State s WITH (NOLOCK)
 JOIN dbo.BaseManagedEntity bme WITH (NOLOCK)
     ON s.BaseManagedEntityId = bme.BaseManagedEntityId
@@ -536,8 +564,12 @@ WHERE s.MonitorId = @MonitorId
                 changes.Count, sw.ElapsedMilliseconds);
         }
 
-        private static EntityStateDto ReadRow(SqlDataReader r, out DateTime lastModified)
+        private EntityStateDto ReadRow(SqlDataReader r, out DateTime lastModified)
         {
+            string mp = "";
+            if (_includeMp && !r.IsDBNull(5))
+                _typeMps.TryGetValue(r.GetGuid(5), out mp);
+
             int hs = r.IsDBNull(3) ? 0 : Convert.ToInt32(r.GetValue(3));
             lastModified = r.IsDBNull(4) ? DateTime.MinValue : r.GetDateTime(4);
 
@@ -546,6 +578,7 @@ WHERE s.MonitorId = @MonitorId
                 BaseManagedEntityId = r.GetGuid(0),
                 DisplayName = r.IsDBNull(1) ? "" : r.GetString(1),
                 FullName = r.IsDBNull(2) ? "" : r.GetString(2),
+                ManagementPack = mp ?? "",
                 HealthState = hs,
                 HealthText = hs switch
                 {
@@ -555,6 +588,47 @@ WHERE s.MonitorId = @MonitorId
                     _ => "Unknown"
                 }
             };
+        }
+
+        /// <summary>
+        /// Reloads ManagedTypeId -> management pack name (the MP that defines the class).
+        /// On failure the previous map is kept.
+        /// </summary>
+        private void RefreshTypeMps()
+        {
+            if (!_includeMp)
+                return;
+
+            const string sql = @"
+SELECT mt.ManagedTypeId, mp.MPName
+FROM dbo.ManagedType mt WITH (NOLOCK)
+JOIN dbo.ManagementPack mp WITH (NOLOCK)
+    ON mt.ManagementPackId = mp.ManagementPackId";
+
+            var map = new Dictionary<Guid, string>();
+            var sw = Stopwatch.StartNew();
+
+            try
+            {
+                using var conn = new SqlConnection(_connString);
+                using var cmd = new SqlCommand(sql, conn);
+                conn.Open();
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    if (!r.IsDBNull(0) && !r.IsDBNull(1))
+                        map[r.GetGuid(0)] = r.GetString(1);
+                }
+            }
+            catch (SqlException ex)
+            {
+                _log.LogError(ex, "State: loading class management packs failed after {ElapsedMs}ms — keeping the previous map",
+                    sw.ElapsedMilliseconds);
+                return;
+            }
+
+            _typeMps = map;
+            _log.LogDebug("State: loaded {Count} class management pack mappings in {ElapsedMs}ms", map.Count, sw.ElapsedMilliseconds);
         }
 
         private Guid LoadEntityStateMonitorId()

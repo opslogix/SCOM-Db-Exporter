@@ -9,6 +9,12 @@ namespace ScomDbExporter.Config
         // several instances in the same Windows Application log can be told apart.
         public string InstanceName { get; set; }
 
+        // Adds an "mp" label (name of the management pack) to the performance metrics and
+        // an mp field to the /state output. Performance: the MP of the rule that collects the
+        // counter. Monitor state: the MP of the monitor. Entity state: the MP of the entity's
+        // class (usually a Discovery or Library MP). Off by default.
+        public bool IncludeManagementPack { get; set; } = false;
+
         public HttpConfig Http { get; set; } = new HttpConfig();
         public ModuleConfig Modules { get; set; } = new ModuleConfig();
         public GroupResolverConfig GroupResolver { get; set; } = new GroupResolverConfig();
