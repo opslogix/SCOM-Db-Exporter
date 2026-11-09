@@ -15,6 +15,27 @@ sc create ScomDbExporterService binPath= "C:\Program Files\ScomDbExporter\ScomDb
 
 Both executables require **.NET Framework 4.7.2 or 4.8**. This requirement aligns the exporter with the .NET framework version used by SCOM itself.
 
+## Upgrading from v1.0.x
+
+v1.1.0 adds group filtering, Serilog logging and most of the other settings in this README. v1.0.4 and earlier ignore settings they do not know without a warning, so if a setting seems to have no effect, check which version is installed first.
+
+1. Stop the service.
+2. Back up `appsettings.json`, and any file in `Mappings\` that you changed. The ZIP contains its own copies and overwrites them.
+3. Extract the ZIP over the installation folder and copy your values back into the new `appsettings.json`. Settings from v1.0.x keep working, and new settings default to the old behaviour except where listed below.
+4. Start the service.
+
+Changes to check after the upgrade:
+
+| Change | What to do |
+|---|---|
+| Alerts are pushed to `Modules.Alert.AlloyEndpoint`, default `http://localhost:9465/loki/api/v1/raw`. v1.0.x only served them on `/alerts`. | Point `AlloyEndpoint` at your Alloy `loki.source.api` receiver (see [Alerts (JSON to Loki)](#alerts-json-to-loki)), or set it to `""` to turn the push off. Otherwise every push fails and logs an error. |
+| `/state` and `/alerts` listen on `Http.Host`. In v1.0.x these two endpoints always listened on all interfaces (`+`). | If `/state` is scraped from another server while `Http.Host` is `localhost`, set `Http.Host` to `+` or the server name. `+` needs admin rights or a `netsh http add urlacl` reservation. |
+| SQL Server disk latency counters are exported as `mssql_disk_read_latency_ms`, `mssql_disk_write_latency_ms`, `mssql_database_disk_read_latency_ms` and `mssql_database_disk_write_latency_ms` (new `Mappings\Microsoft.SQLServer.Windows.json`). Other SQL Server counters are still `scom_raw_value`. | Update dashboards that read these counters from `scom_raw_value`. |
+| `scom_raw_value` has two extra labels, `instance_name` and `entity_class`. | Queries keep working, but each series starts over as a new series in Prometheus. |
+| A performance series is removed when its newest sample is older than `SeriesMaxAgeHours` (default 168). v1.0.x exported the last value forever. | See [Stale series and metadata refresh](#stale-series-and-metadata-refresh). |
+| The log level is set in the `Serilog` section. v1.0.x always logged at `Information`. | Add the `Serilog` section from the example under [Configuration](#configuration) to change it. |
+| `Modules.Alert.ClosedAlertRetentionMinutes` is no longer used. | Remove it. It is ignored if left in. |
+
 ## Configuration
 
 To configure the exporter, edit the `appsettings.json` file included in the package.
@@ -265,7 +286,7 @@ scom_monitor_health_state{monitor_name="...",instance="server01",full_name="..."
 - Only unit monitors are exported (not aggregate or dependency monitors such as `System.Health.AvailabilityState`).
 - The `Groups` setting of the State module applies to the monitor state too.
 - Monitors that are deleted, or entities that are deleted, disappear at the next full reconcile (`FullReconcileMinutes`); the monitors matching the patterns are looked up again at each full reconcile.
-- Cost: the queries read `dbo.State` like the entity state does. In the environments measured (see `Benchmark/`) a pattern that selects a few monitors costs about 10 ms per query; all unit monitors with health state above 0 would be 3.4 times (Scania) to 1.8 times (a large environment) the number of series of the entity state, so keep the patterns narrow.
+- Cost: the queries read `dbo.State` like the entity state does. In the environments we measured, a pattern that selects a few monitors costs about 10 ms per query. Exporting every unit monitor with a health state above 0 would produce 1.8 to 3.4 times as many series as the entity state, so keep the patterns narrow.
 
 ## Late-arriving performance samples
 
