@@ -133,7 +133,6 @@ namespace ScomDbExporter.Config
     public class AlertModuleToggle : ModuleToggle
     {
         public bool IncludeClosedAlerts { get; set; } = false;
-        public int ClosedAlertRetentionMinutes { get; set; } = 60;
 
         // SQL command timeout for the alert query. The default 30 s is too short on a cold
         // buffer cache, where reading the large Context column is disk bound.
