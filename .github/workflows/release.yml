@@ -35,34 +35,54 @@ jobs:
 
           & $msbuild ScomDbExporter.sln /p:Configuration=Release
 
-      # ✅ Package with deduplication (flat ZIP, no duplicates)
+      # ✅ Package with deduplication (no duplicates, subfolders such as Mappings\ kept)
       - name: Package Release
         shell: pwsh
         run: |
           $artifactDir = "artifacts"
+          $stageDir = "$artifactDir/stage"
           $safeName = "${{ github.ref_name }}" -replace '[/\\:*?"<>|]', '-'
           $zip = "$artifactDir/ScomDbExporter-$safeName.zip"
 
-          New-Item -ItemType Directory -Force $artifactDir | Out-Null
+          New-Item -ItemType Directory -Force $stageDir | Out-Null
 
-          # Collect all Release files
-          $files = Get-ChildItem -Recurse -File `
-            ScomDbExporter\bin\Release, `
-            ScomDbExporter.Console\bin\Release, `
-            ScomDbExporter.Service\bin\Release
+          # Collect all Release files with their path relative to bin\Release
+          $roots = "ScomDbExporter\bin\Release",
+                   "ScomDbExporter.Console\bin\Release",
+                   "ScomDbExporter.Service\bin\Release"
+
+          $files = foreach ($root in $roots) {
+            $rootPath = (Resolve-Path $root).Path
+            Get-ChildItem -Recurse -File $rootPath | ForEach-Object {
+              [pscustomobject]@{
+                FullName = $_.FullName
+                Relative = $_.FullName.Substring($rootPath.Length).TrimStart('\', '/')
+              }
+            }
+          }
 
           if (-not $files) {
             throw "No files found to package"
           }
 
-          # Deduplicate by filename (first occurrence wins)
-          $uniqueFiles = $files |
+          # Deduplicate by relative path (first occurrence wins). Passing the files
+          # themselves to Compress-Archive would put every file at the ZIP root, and
+          # the exporter only reads mapping files from the Mappings folder.
+          $files |
             Sort-Object FullName |
-            Group-Object Name |
-            ForEach-Object { $_.Group[0].FullName }
+            Group-Object Relative |
+            ForEach-Object {
+              $dest = Join-Path $stageDir $_.Name
+              New-Item -ItemType Directory -Force (Split-Path $dest) | Out-Null
+              Copy-Item $_.Group[0].FullName $dest
+            }
+
+          if (-not (Test-Path "$stageDir/Mappings/*.json")) {
+            throw "Mappings folder is missing from the package"
+          }
 
           Compress-Archive `
-            -Path $uniqueFiles `
+            -Path "$stageDir/*" `
             -DestinationPath $zip `
             -Force
 
