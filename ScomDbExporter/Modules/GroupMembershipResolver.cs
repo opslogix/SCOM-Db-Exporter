@@ -11,7 +11,8 @@ namespace ScomDbExporter.Modules
     /// <summary>
     /// Resolves SCOM group display names to the set of BaseManagedEntityIds
     /// that belong to those groups (directly, transitively via nested groups,
-    /// and optionally via hosting relationships).
+    /// optionally via configured relationship types, and optionally via hosting
+    /// relationships).
     /// </summary>
     internal sealed class GroupMembershipResolver
     {
@@ -120,6 +121,10 @@ namespace ScomDbExporter.Modules
                 for (int i = 0; i < _allConfiguredNames.Count; i++)
                     cmd.Parameters.AddWithValue("@g" + i, _allConfiguredNames[i]);
 
+                var followTypes = GetFollowTypes();
+                for (int i = 0; i < followTypes.Count; i++)
+                    cmd.Parameters.AddWithValue("@r" + i, followTypes[i]);
+
                 conn.Open();
                 using var r = cmd.ExecuteReader();
                 while (r.Read())
@@ -167,11 +172,30 @@ namespace ScomDbExporter.Modules
                 rowCount, totalDistinct, perGroupSummary, sw.ElapsedMilliseconds, _config.RefreshMinutes);
         }
 
+        private List<string> GetFollowTypes()
+        {
+            var list = new List<string>();
+            if (_config.FollowRelationshipTypes == null) return list;
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var t in _config.FollowRelationshipTypes)
+            {
+                if (!string.IsNullOrWhiteSpace(t) && seen.Add(t.Trim()))
+                    list.Add(t.Trim());
+            }
+            return list;
+        }
+
         private string BuildSql()
         {
             var paramList = new List<string>(_allConfiguredNames.Count);
             for (int i = 0; i < _allConfiguredNames.Count; i++)
                 paramList.Add("@g" + i);
+
+            var followTypes = GetFollowTypes();
+            var followParams = new List<string>(followTypes.Count);
+            for (int i = 0; i < followTypes.Count; i++)
+                followParams.Add("@r" + i);
 
             var sb = new StringBuilder();
             sb.Append(@"
@@ -191,17 +215,44 @@ DirectMembers AS (
     JOIN dbo.BaseManagedEntity tbme WITH (NOLOCK)
         ON tbme.BaseManagedEntityId = r.TargetEntityId
        AND tbme.IsDeleted = 0
+),
+Members AS (
+    SELECT GroupName, BmeId FROM DirectMembers");
+
+            if (followTypes.Count > 0)
+            {
+                // Entities reached from a direct member over one of the configured
+                // relationship types (e.g. Windows Computer -> SQL DB Engine, which is
+                // containment and so is not covered by TopLevelHostEntityId).
+                sb.Append(@"
+    UNION
+    SELECT dm.GroupName, r.TargetEntityId
+    FROM DirectMembers dm
+    JOIN dbo.Relationship r WITH (NOLOCK)
+        ON r.SourceEntityId = dm.BmeId
+       AND r.IsDeleted = 0
+    JOIN dbo.RelationshipType rt WITH (NOLOCK)
+        ON rt.RelationshipTypeId = r.RelationshipTypeId
+       AND rt.RelationshipTypeName IN (");
+                sb.Append(string.Join(", ", followParams));
+                sb.Append(@")
+    JOIN dbo.BaseManagedEntity fbme WITH (NOLOCK)
+        ON fbme.BaseManagedEntityId = r.TargetEntityId
+       AND fbme.IsDeleted = 0");
+            }
+
+            sb.Append(@"
 )
-SELECT GroupName, BmeId FROM DirectMembers");
+SELECT GroupName, BmeId FROM Members");
 
             if (_config.IncludeHostedChildren)
             {
                 sb.Append(@"
 UNION
-SELECT dm.GroupName, hosted.BaseManagedEntityId
-FROM DirectMembers dm
+SELECT m.GroupName, hosted.BaseManagedEntityId
+FROM Members m
 JOIN dbo.BaseManagedEntity hosted WITH (NOLOCK)
-    ON hosted.TopLevelHostEntityId = dm.BmeId
+    ON hosted.TopLevelHostEntityId = m.BmeId
    AND hosted.IsDeleted = 0");
             }
 
